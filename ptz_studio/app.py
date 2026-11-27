@@ -45,7 +45,8 @@ Espaço ............ foto     R ...... gravar     T ...... tracking
 G grelha · Z zebras · P peaking · N noite · B desfoque · M espelho
 F11 / duplo clique . ecrã inteiro     Ctrl+P ...... reproduzir travelling
 Rato: clique = centrar ali · arrastar = mover · roda = zoom
-       botão direito arrastado = escolher sujeito a seguir
+       Ctrl + clique = seguir esse objeto (contorno automático)
+       botão direito arrastado (ou Shift + arrastar) = escolher sujeito
 Comando Xbox: stick = mover · gatilhos = zoom · A foto · B gravar
        X tracking · Y início · LB/RB presets · Start parar"""
 
@@ -165,6 +166,7 @@ class MainWindow(QMainWindow):
         self.preview.drag_end.connect(lambda: self.ptz.set_velocity(pan=0, tilt=0))
         self.preview.wheel_zoom.connect(self._wheel_zoom)
         self.preview.subject_selected.connect(self.select_subject)
+        self.preview.click_track.connect(self.track_at)
         self.preview.double_clicked.connect(self.toggle_fullscreen)
         split.addWidget(self.preview)
         self.tabs = QTabWidget()
@@ -411,7 +413,7 @@ class MainWindow(QMainWindow):
         self.btn_yunet.setVisible(not YUNET_PATH.exists())
         v.addWidget(self.btn_yunet)
         lay.addWidget(g2)
-        lay.addWidget(QLabel("Dica: com o botão direito arraste um retângulo sobre qualquer objeto ou pessoa "
+        lay.addWidget(QLabel("Dica: arraste com o botão direito (ou Shift + botão esquerdo) um retângulo sobre qualquer objeto ou pessoa "
                              "para a câmara o seguir. Funciona também em telemóveis e na Canon (PTZ digital).",
                              objectName="hint", wordWrap=True))
         lay.addStretch(1)
@@ -938,6 +940,35 @@ class MainWindow(QMainWindow):
         self._update_detector_label()
         self.set_tracking(True)
 
+    def track_at(self, u: float, v: float) -> None:
+        """Ctrl + clique: encontra o objeto pela cor à volta do ponto e passa a segui-lo."""
+        img = self.capture.latest(processed=False) if self.capture else None
+        x, y = self.pipeline.out_to_raw(u, v)
+        box = None
+        if img is not None:
+            h, w = img.shape[:2]
+            sw = 480
+            small = cv2.GaussianBlur(cv2.resize(img, (sw, int(h * sw / w)), interpolation=cv2.INTER_AREA), (5, 5), 0)
+            sh = small.shape[0]
+            seed = (min(sw - 1, int(x * sw)), min(sh - 1, int(y * sh)))
+            mask = np.zeros((sh + 2, sw + 2), np.uint8)
+            flags = 4 | cv2.FLOODFILL_MASK_ONLY | cv2.FLOODFILL_FIXED_RANGE | (255 << 8)
+            cv2.floodFill(small, mask, seed, (0, 0, 0), (22, 22, 22), (22, 22, 22), flags)
+            ys, xs = np.nonzero(mask[1:-1, 1:-1])
+            if len(xs) > 40:
+                bx, by, bw, bh = xs.min() / sw, ys.min() / sh, (xs.max() - xs.min() + 1) / sw, (ys.max() - ys.min() + 1) / sh
+                if 0.02 < bw < 0.6 and 0.02 < bh < 0.7:  # ignora fundos inteiros (ex.: a parede verde)
+                    box = (bx, by, bw, bh)
+        if box is None:  # caixa média à volta do clique
+            box = (max(0.0, x - 0.07), max(0.0, y - 0.1), 0.14, 0.2)
+        self.tracker.select(box)
+        self.cmb_track_mode.blockSignals(True)
+        self.cmb_track_mode.setCurrentIndex(self.cmb_track_mode.findData("subject"))
+        self.cmb_track_mode.blockSignals(False)
+        self._update_detector_label()
+        self.set_tracking(True)
+        self.statusBar().showMessage("A seguir o objeto escolhido (Esc para parar)", 4000)
+
     def _update_detector_label(self) -> None:
         self.lbl_detector.setText(self.tracker.detector_name)
 
@@ -1397,6 +1428,15 @@ class MainWindow(QMainWindow):
             self._apply_held(ev.modifiers())
             return True
         return False
+
+    def changeEvent(self, ev) -> None:
+        # Ao perder o foco, o Windows entrega o "largar tecla" a outra janela: sem isto uma seta
+        # ficava "presa" e a câmara continuava a rodar sozinha.
+        if ev.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
+            if self._held_keys or any(self.ptz.velocity.values()):
+                self._held_keys.clear()
+                self.ptz.set_velocity(pan=0, tilt=0, zoom=0)
+        super().changeEvent(ev)
 
     def toggle_fullscreen(self) -> None:
         if self.isFullScreen():

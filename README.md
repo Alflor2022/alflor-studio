@@ -15,7 +15,7 @@ Premiere/CapCut, Stream Deck e câmara virtual (Zoom, Teams, Meet…).
 | Área | O que faz |
 |---|---|
 | **Controlo PTZ** | Movimento contínuo com curva de precisão, velocidade ajustável, zoom absoluto e contínuo, posição inicial. |
-| **Rato** | Clique = centra a câmara nesse ponto · arrastar = mover · roda = zoom · botão direito arrastado = escolher sujeito a seguir · duplo clique = ecrã inteiro. |
+| **Rato** | Clique = centra a câmara nesse ponto · arrastar = mover · roda = zoom · **Ctrl + clique = seguir esse objeto** (contorno automático) · botão direito arrastado ou Shift + arrastar = escolher sujeito · duplo clique = ecrã inteiro. |
 | **Teclado** | Setas/WASD, zoom +/−, presets 1–9, foto, gravação, tracking, ferramentas (ver abaixo). |
 | **Comando Xbox** | Stick = mover, gatilhos = zoom, A foto, B gravar, X tracking, Y início, LB/RB presets. |
 | **Presets** | 9 por câmara, com miniatura e nome, transição suave com curva (Linear, Suave, Cinema, Acelerar, Travar). |

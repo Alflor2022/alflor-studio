@@ -202,6 +202,7 @@ class AutoFramer:
         self._last_cmd = 0.0
         self._last_zoom = 0.0
         self._lost_since = 0.0
+        self._settle_until = 0.0  # PTZ físico: a imagem chega atrasada face ao motor
 
     def magnification(self) -> float:
         if not self.ptz.has("zoom"):
@@ -228,7 +229,7 @@ class AutoFramer:
         self._lost_since = 0
         sens = float(self.settings["sensitivity"])
         interval = 0.22 - 0.12 * sens  # mais sensível = corrige mais vezes
-        if now - self._last_cmd < interval:
+        if now - self._last_cmd < interval or now < self._settle_until:
             return
         self._last_cmd = now
         x, y, w, h = box
@@ -244,9 +245,19 @@ class AutoFramer:
         gain = 0.25 + 0.35 * sens
         mag = self.magnification()
         if self.ptz.is_physical:
-            dpan = ex * self.calibration["pan_fw"] / mag * gain if abs(ex) > dead else 0.0
+            # Malha aberta com atraso: corrige uma fração do erro, no máximo 12% do ecrã por passo,
+            # e espera o motor chegar + a imagem estabilizar antes de medir outra vez.
+            # (Sem isto as correções acumulam-se, a câmara passa do ponto e o tracker escorrega.)
+            gain = 0.35 + 0.25 * sens
+            pfw = self.calibration["pan_fw"] / mag
+            tfh = self.calibration["tilt_fh"] / mag
+            ex = max(-0.12, min(0.12, ex)) if abs(ex) > dead else 0.0
+            ey = max(-0.12, min(0.12, ey)) if abs(ey) > dead else 0.0
             # calibração com sinal: pan_fw = unidades por largura de frame (sentido incluído)
-            dtilt = -ey * self.calibration["tilt_fh"] / mag * gain if abs(ey) > dead else 0.0
+            dpan = ex * pfw * gain
+            dtilt = -ey * tfh * gain
+            if dpan or dtilt:
+                self._settle_until = now + 0.45 + max(abs(dpan) / 500.0, abs(dtilt) / 300.0)
         else:
             scale = self.pipeline.crop_rect()[2]
             free = max(1e-3, 0.5 - 0.5 * scale)

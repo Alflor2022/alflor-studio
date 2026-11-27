@@ -18,6 +18,7 @@ class PreviewWidget(QWidget):
     drag_end = Signal()
     wheel_zoom = Signal(int)
     subject_selected = Signal(float, float, float, float)
+    click_track = Signal(float, float)
     double_clicked = Signal()
 
     def __init__(self, settings, parent=None) -> None:
@@ -132,12 +133,18 @@ class PreviewWidget(QWidget):
     # --- rato -----------------------------------------------------------------------------
     def mousePressEvent(self, ev) -> None:
         self.setFocus()
-        if ev.button() == Qt.MouseButton.LeftButton:
-            self._press = ev.position()
-            self._dragging = False
-        elif ev.button() == Qt.MouseButton.RightButton:
+        shift = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if ev.button() == Qt.MouseButton.LeftButton and ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.click_track.emit(*self._norm(ev.position()))  # Ctrl + clique = seguir este objeto
+            return
+        # escolher sujeito: botão direito arrastado OU Shift + botão esquerdo (touchpads)
+        if ev.button() == Qt.MouseButton.RightButton or (ev.button() == Qt.MouseButton.LeftButton and shift):
+            self._select_button = ev.button()
             self._select_start = ev.position()
             self._select_rect = QRectF(ev.position(), ev.position())
+        elif ev.button() == Qt.MouseButton.LeftButton:
+            self._press = ev.position()
+            self._dragging = False
 
     def mouseMoveEvent(self, ev) -> None:
         if self._press is not None:
@@ -160,7 +167,7 @@ class PreviewWidget(QWidget):
                 self.clicked.emit(*self._norm(ev.position()))
             self._press = None
             self._dragging = False
-        elif ev.button() == Qt.MouseButton.RightButton and self._select_rect is not None:
+        elif ev.button() == getattr(self, "_select_button", None) and self._select_rect is not None:
             rect = self._select_rect
             self._select_start = None
             self._select_rect = None
@@ -174,7 +181,9 @@ class PreviewWidget(QWidget):
         self.double_clicked.emit()
 
     def wheelEvent(self, ev) -> None:
-        self.wheel_zoom.emit(1 if ev.angleDelta().y() > 0 else -1)
+        notches = ev.angleDelta().y() / 120  # cada "clique" da roda conta (antes só contava 1 por evento)
+        if notches:
+            self.wheel_zoom.emit(int(round(notches)) or (1 if notches > 0 else -1))
 
 
 class JoystickWidget(QWidget):
