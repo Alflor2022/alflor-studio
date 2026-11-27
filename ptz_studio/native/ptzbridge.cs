@@ -1,4 +1,4 @@
-// PTZ Studio - ponte nativa DirectShow (IAMCameraControl / IAMVideoProcAmp).
+// Alflor Studio - ponte nativa DirectShow (IAMCameraControl / IAMVideoProcAmp).
 // Compilado automaticamente pela app com o csc.exe do .NET Framework 4 (C# 5).
 // Protocolo: uma linha por pedido "<id> <comando> [argumentos]" -> "<id> <json>".
 // Funciona em paralelo com outra aplicação a usar a câmara (ex.: OBS).

@@ -1,4 +1,4 @@
-# PTZ Studio
+# Alflor Studio
 
 **Comando virtual profissional para câmaras PTZ USB, DSLR e telemóveis, no Windows.**
 Controlo por teclado, rato, joystick no ecrã, comando Xbox e telemóvel (Wi-Fi), com tracking de sujeito,
@@ -41,7 +41,7 @@ Requisitos: Windows 10/11, Python 3.11–3.13, FFmpeg (`winget install Gyan.FFmp
 ```powershell
 git clone https://github.com/Alflor2022/ptz-studio.git
 cd ptz-studio
-.\"PTZ Studio.bat"
+.\"Alflor Studio.bat"
 ```
 
 Na primeira execução o `.bat` cria o ambiente `.venv` e instala as dependências. A ponte nativa
@@ -62,10 +62,10 @@ F11 / duplo clique . ecrã inteiro     Ctrl+P ...... reproduzir travelling
 ## Trabalhar com outras ferramentas
 
 - **OBS Studio** – recomendados os plugins [obs-ptz](https://github.com/glikely/obs-ptz) (painel PTZ, também por UVC) e
-  [obs-face-tracker](https://github.com/norihiro/obs-face-tracker). O PTZ Studio controla a câmara **mesmo quando o OBS a está a usar**
-  (a ponte DirectShow funciona em paralelo). Para usar o tracking/looks do PTZ Studio dentro do OBS, ative a câmara virtual.
+  [obs-face-tracker](https://github.com/norihiro/obs-face-tracker). O Alflor Studio controla a câmara **mesmo quando o OBS a está a usar**
+  (a ponte DirectShow funciona em paralelo). Para usar o tracking/looks do Alflor Studio dentro do OBS, ative a câmara virtual.
   Para ligar por WebSocket: OBS › Ferramentas › Definições do servidor WebSocket › Ativar.
-- **Premiere Pro / CapCut / DaVinci** – os ficheiros ficam em `Vídeos\PTZ Studio\AAAA-MM-DD\{Fotos,Videos}` com nomes de projeto, cena e take.
+- **Premiere Pro / CapCut / DaVinci** – os ficheiros ficam em `Vídeos\Alflor Studio\AAAA-MM-DD\{Fotos,Videos}` com nomes de projeto, cena e take.
   Para edição pesada use o codec *MJPEG intra*.
 - **VLC** – Abrir fluxo de rede: `http://IP:8765/stream.mjpg?k=TOKEN` (mostrado no separador Ligações).
 - **Cloud** – escolha a pasta do OneDrive/Google Drive como pasta de saída (botão OneDrive incluído).
@@ -89,7 +89,7 @@ F11 / duplo clique . ecrã inteiro     Ctrl+P ...... reproduzir travelling
 | Câmara | Hoje | Como |
 |---|---|---|
 | **PTZ USB (UVC)** | ✅ completo | Motores reais via DirectShow. |
-| **Telemóvel Android / iPhone** | ✅ como fonte + PTZ digital + tracking | Iriun Webcam, iVCam, DroidCam, Camo ou «Ligação ao Telemóvel» do Windows: aparecem como câmaras e o PTZ Studio aplica PTZ digital, tracking, looks e gravação. |
+| **Telemóvel Android / iPhone** | ✅ como fonte + PTZ digital + tracking | Iriun Webcam, iVCam, DroidCam, Camo ou «Ligação ao Telemóvel» do Windows: aparecem como câmaras e o Alflor Studio aplica PTZ digital, tracking, looks e gravação. |
 | **Canon EOS 5D (Mark III/IV)** | ✅ como fonte + PTZ digital + tracking | Saída HDMI limpa + placa de captura USB, ou *EOS Webcam Utility*. Focus peaking e medidor de nitidez ajudam a focar. |
 | **Canon (controlo total)** | 🛠 em preparação | Disparo RAW, ISO, obturador, abertura e foco motorizado via Canon EDSDK (requer registo gratuito no programa de programadores Canon). |
 | **PTZ de rede (VISCA/ONVIF/NDI)** | 🛠 planeado | Use o obs-ptz entretanto. |
@@ -100,9 +100,9 @@ F11 / duplo clique . ecrã inteiro     Ctrl+P ...... reproduzir travelling
 - **Sem foco, exposição nem íris** por USB e **sem infravermelhos** (não há controlo IR exposto).
   À noite: luz LED contínua suave + modo noite + empilhamento de fotos dão os melhores resultados.
 - **Sem microfone**: use um microfone USB, de lapela sem fios (com recetor USB) ou o do telemóvel.
-- **Não informa a posição** (lê sempre 0): o PTZ Studio guarda a posição que comanda.
-- **Só obedece com vídeo ativo**: o PTZ Studio reenvia a posição quando o vídeo arranca.
-- **Sem fios**: não é nativa. Opções: mini-PC ou Raspberry Pi junto da câmara a correr o PTZ Studio
+- **Não informa a posição** (lê sempre 0): o Alflor Studio guarda a posição que comanda.
+- **Só obedece com vídeo ativo**: o Alflor Studio reenvia a posição quando o vídeo arranca.
+- **Sem fios**: não é nativa. Opções: mini-PC ou Raspberry Pi junto da câmara a correr o Alflor Studio
   (controlo pelo telemóvel e stream pela rede), extensor USB-sobre-IP, ou power bank + telemóvel Android OTG.
 
 ## Arquitetura

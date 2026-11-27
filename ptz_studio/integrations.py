@@ -160,7 +160,7 @@ def _ver(tag: str) -> tuple:
 def check_update(timeout: float = 6.0) -> dict | None:
     """Consulta a última release no GitHub. Devolve {tag, url, notes} se for mais recente."""
     req = urllib.request.Request(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
-                                 headers={"Accept": "application/vnd.github+json", "User-Agent": "ptz-studio-updater"})
+                                 headers={"Accept": "application/vnd.github+json", "User-Agent": "alflor-studio-updater"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             data = json.loads(r.read().decode("utf-8"))
@@ -180,7 +180,7 @@ def apply_update(info: dict) -> str:
         if out.returncode != 0:
             raise RuntimeError(out.stderr or out.stdout)
     else:
-        tmp = Path(tempfile.mkdtemp(prefix="ptzstudio-update-"))
+        tmp = Path(tempfile.mkdtemp(prefix="alflorstudio-update-"))
         archive = tmp / "update.zip"
         urllib.request.urlretrieve(info["zip"], archive)
         with zipfile.ZipFile(archive) as z:

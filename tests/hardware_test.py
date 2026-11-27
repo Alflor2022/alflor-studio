@@ -31,7 +31,7 @@ from ptz_studio.remote import RemoteServer  # noqa: E402
 from ptz_studio.tracking import AutoFramer, SubjectTracker  # noqa: E402
 
 DEVICE = sys.argv[1] if len(sys.argv) > 1 else "UVC Camera"
-OUT = Path(sys.argv[2] if len(sys.argv) > 2 else Path.home() / "Videos" / "PTZ Studio" / "_teste")
+OUT = Path(sys.argv[2] if len(sys.argv) > 2 else Path.home() / "Videos" / "Alflor Studio" / "_teste")
 OUT.mkdir(parents=True, exist_ok=True)
 results: dict = {}
 

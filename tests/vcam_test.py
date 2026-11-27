@@ -22,7 +22,7 @@ def feed():
     while not stop:
         f = np.zeros((720, 1280, 3), np.uint8)
         f[:] = (40, 30, 20)
-        cv2.putText(f, "PTZ STUDIO VCAM", (230, 380), cv2.FONT_HERSHEY_SIMPLEX, 3, (61, 138, 255), 8)
+        cv2.putText(f, "ALFLOR STUDIO VCAM", (230, 380), cv2.FONT_HERSHEY_SIMPLEX, 3, (61, 138, 255), 8)
         cv2.circle(f, (100 + (i * 12) % 1080, 600), 40, (80, 220, 60), -1)
         cam.write(f)
         i += 1

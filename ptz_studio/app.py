@@ -1,4 +1,4 @@
-"""Janela principal do PTZ Studio."""
+"""Janela principal do Alflor Studio."""
 from __future__ import annotations
 
 import os
@@ -79,8 +79,9 @@ class MainWindow(QMainWindow):
     photo_saved = Signal(str)
     update_found = Signal(dict)
 
-    def __init__(self) -> None:
+    def __init__(self, test_mode: bool = False) -> None:
         super().__init__()
+        self.test_mode = test_mode  # teste automático: sem teclado e sem gravar definições
         self.settings = Settings.load()
         self.setWindowTitle(f"{APP_NAME} {__version__}")
         self.resize(1500, 900)
@@ -449,7 +450,7 @@ class MainWindow(QMainWindow):
         onedrive = os.environ.get("OneDrive")
         if onedrive:
             b_cloud = QPushButton("Guardar no OneDrive (sincroniza na cloud)")
-            b_cloud.clicked.connect(lambda: self._set_output(str(Path(onedrive) / "PTZ Studio")))
+            b_cloud.clicked.connect(lambda: self._set_output(str(Path(onedrive) / "Alflor Studio")))
             f.addRow(b_cloud)
         lay.addWidget(g)
 
@@ -1334,6 +1335,8 @@ class MainWindow(QMainWindow):
         t = ev.type()
         if t not in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
             return False
+        if self.test_mode:
+            return True  # engole as teclas: nada de fotos, gravações ou movimentos acidentais
         if not self.isActiveWindow():
             return False
         focus = QApplication.focusWidget()
@@ -1435,20 +1438,25 @@ class MainWindow(QMainWindow):
         if self.bridge:
             self.bridge.shutdown()
         self.obs.disconnect()
-        self.settings.save()
+        if not self.test_mode:
+            self.settings.save()
         super().closeEvent(ev)
 
 
 def main() -> int:
     if sys.platform == "win32":
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Alflor2022.PTZStudio")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Alflor2022.AlflorStudio")
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
-    win = MainWindow()
+    test_mode = "--screenshot" in sys.argv
+    win = MainWindow(test_mode=test_mode)
+    if test_mode:  # não rouba o foco a quem está a escrever noutra janela
+        win.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        win.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus)
     win.show()
     # Teste automático: --screenshot <ficheiro> [segundos] guarda uma captura da janela e sai
-    if "--screenshot" in sys.argv:
+    if test_mode:
         i = sys.argv.index("--screenshot")
         out = sys.argv[i + 1]
         delay = float(sys.argv[i + 2]) if len(sys.argv) > i + 2 else 6.0

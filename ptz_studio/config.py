@@ -1,4 +1,4 @@
-"""Definições persistentes da aplicação (JSON em %APPDATA%\\PTZStudio)."""
+"""Definições persistentes da aplicação (JSON em %APPDATA%\\AlflorStudio)."""
 from __future__ import annotations
 
 import copy
@@ -8,9 +8,11 @@ import secrets
 import shutil
 from pathlib import Path
 
-APP_DATA = Path(os.environ.get("APPDATA", Path.home())) / "PTZStudio"
-LOCAL_DATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "PTZStudio"
+APP_DATA = Path(os.environ.get("APPDATA", Path.home())) / "AlflorStudio"
+LOCAL_DATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "AlflorStudio"
 CONFIG_FILE = APP_DATA / "config.json"
+# nomes anteriores da aplicação: definições, calibração, presets e modelos migram automaticamente
+LEGACY_NAMES = ("PTZStudio",)
 PACKAGE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = PACKAGE_DIR.parent
 
@@ -18,7 +20,7 @@ DEFAULTS: dict = {
     "device": "UVC Camera",
     "resolution": "max",            # "max" | "3840x2160" | "1920x1080" | "1280x720"
     "fps": 30,
-    "output_dir": str(Path.home() / "Videos" / "PTZ Studio"),
+    "output_dir": str(Path.home() / "Videos" / "Alflor Studio"),
     "project": "Projeto",
     "scene": "Cena1",
     "take": 1,
@@ -57,6 +59,38 @@ def _merge(base: dict, extra: dict) -> dict:
 class Settings(dict):
     """Dicionário de definições com gravação atómica."""
 
+    @staticmethod
+    def _legacy_data() -> dict:
+        """Junta os dados de versões com nome antigo (ex.: «PTZ Studio»). Corre uma única vez."""
+        marker = APP_DATA / ".migrado"
+        if marker.exists():
+            return {}
+        merged: dict = {}
+        for old in LEGACY_NAMES:
+            for new_dir, env in ((APP_DATA, "APPDATA"), (LOCAL_DATA, "LOCALAPPDATA")):
+                old_dir = Path(os.environ.get(env, Path.home())) / old
+                if not old_dir.is_dir():
+                    continue
+                for src in old_dir.rglob("*"):  # copia o que falta (miniaturas, modelos IA); nunca sobrescreve
+                    rel = src.relative_to(old_dir)
+                    if src.is_file() and rel.parts[0] != "bin" and rel.name != "config.json":
+                        dst = new_dir / rel
+                        if not dst.exists():
+                            dst.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(src, dst)
+            old_cfg = Path(os.environ.get("APPDATA", Path.home())) / old / "config.json"
+            try:
+                data = json.loads(old_cfg.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if data.get("output_dir") == str(Path.home() / "Videos" / "PTZ Studio"):
+                data.pop("output_dir")  # usa a nova pasta por omissão
+            text = json.dumps(data, ensure_ascii=False).replace(f"\\\\{old}\\\\", f"\\\\{APP_DATA.name}\\\\")
+            merged = _merge(merged, json.loads(text))
+        APP_DATA.mkdir(parents=True, exist_ok=True)
+        marker.write_text("1")
+        return merged
+
     @classmethod
     def load(cls) -> "Settings":
         data = {}
@@ -65,7 +99,12 @@ class Settings(dict):
                 data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 shutil.copy(CONFIG_FILE, CONFIG_FILE.with_suffix(".corrompido.json"))
+        legacy = cls._legacy_data()
+        if legacy:  # o que já existe na pasta nova tem prioridade
+            data = _merge(legacy, data)
         s = cls(_merge(DEFAULTS, data))
+        if legacy:
+            s.save()
         if not s["remote"]["token"]:
             s["remote"]["token"] = secrets.token_urlsafe(8)
         return s
