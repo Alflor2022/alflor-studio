@@ -17,7 +17,14 @@ SOURCE = PACKAGE_DIR / "native" / "ptzbridge.cs"
 
 
 def build_bridge() -> Path:
-    """Compila a ponte com o csc.exe do Windows (só quando o código muda)."""
+    """Compila a ponte com o csc.exe do Windows (só quando o código muda).
+
+    Na versão instalada (.exe) a ponte já vem compilada junto à aplicação.
+    """
+    import sys
+    bundled = Path(getattr(sys, "_MEIPASS", "")) / "bin" / "ptzbridge.exe" if getattr(sys, "frozen", False) else None
+    if bundled is not None and bundled.exists():
+        return bundled
     bin_dir = LOCAL_DATA / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     exe = bin_dir / "ptzbridge.exe"

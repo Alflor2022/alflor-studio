@@ -1,15 +1,79 @@
 """Processamento de imagem em tempo real e ferramentas de monitorização.
 
 Ordem: recorte PTZ digital -> espelho -> modo noite -> redução de ruído temporal ->
-nitidez -> look de cor -> desfoco de fundo. Tudo com operações OpenCV rápidas para
-manter 1080p a 30 fps num portátil.
+chroma key / recorte IA -> nitidez -> look de cor -> desfoco de fundo. Tudo com operações
+OpenCV rápidas para manter 1080p a 25–30 fps num portátil; o chroma corre numa thread
+própria (1 frame de atraso) para não baixar os fps.
 """
 from __future__ import annotations
 
 import threading
+import time
 
 import cv2
 import numpy as np
+
+from .chroma import ChromaKeyer
+
+
+class AsyncStage:
+    """Executa `fn(frame)` em `workers` threads (frames alternados) e entrega sempre o
+    resultado mais recente já pronto (pipelining). O OpenCV liberta o GIL, por isso há
+    paralelismo real. `fps` mede quantos resultados NOVOS saem por segundo (o que o
+    espectador realmente vê), que pode ser inferior ao fps da câmara se o trabalho for pesado.
+    """
+
+    def __init__(self, fn, workers: int = 2) -> None:
+        self.fn = fn
+        self._cond = threading.Condition()
+        self._pending: list = []          # [(seq, frame)] — no máximo `workers`, descarta os mais antigos
+        self._result = None
+        self._result_seq = -1
+        self._seq = 0
+        self._workers = workers
+        self._running = True
+        self.fps = 0.0
+        self._count, self._t0 = 0, time.monotonic()
+        for i in range(workers):
+            threading.Thread(target=self._loop, name=f"chroma-stage-{i}", daemon=True).start()
+
+    def exchange(self, x):
+        with self._cond:
+            first = self._result is None
+            self._seq += 1
+            self._pending.append((self._seq, x))
+            if len(self._pending) > self._workers:
+                self._pending.pop(0)
+            self._cond.notify()
+            res = self._result
+        return self.fn(x) if first else res   # 1.º frame: síncrono (sem imagem em falta)
+
+    def reset(self) -> None:
+        with self._cond:
+            self._pending.clear()
+            self._result = None
+            self._result_seq = -1
+
+    def _loop(self) -> None:
+        while self._running:
+            with self._cond:
+                while not self._pending and self._running:
+                    self._cond.wait(0.5)
+                if not self._pending:
+                    continue
+                seq, x = self._pending.pop()     # o mais recente primeiro (menos atraso)
+            try:
+                r = self.fn(x)
+            except Exception:  # nunca matar a thread por um frame
+                continue
+            with self._cond:
+                if seq > self._result_seq:       # nunca voltar atrás no tempo
+                    self._result, self._result_seq = r, seq
+                    self._count += 1
+                now = time.monotonic()
+                if now - self._t0 >= 1.0:
+                    self.fps = self._count / (now - self._t0)
+                    self._count, self._t0 = 0, now
 
 LUMA = np.array([0.114, 0.587, 0.299], np.float32)  # pesos BGR
 
@@ -56,6 +120,36 @@ class Pipeline:
         self.subject_kind = "face"
         self._gain_cache: dict[float, np.ndarray] = {}
         self.frame_size = (1920, 1080)
+        self.chroma = ChromaKeyer(settings.setdefault("chroma", {}))
+        self.alpha: np.ndarray | None = None      # alfa do chroma do último frame (ou None)
+        self.ai_mask_raw: np.ndarray | None = None  # máscara de pessoa da IA (coords raw)
+        self._chroma_stage = AsyncStage(self._chroma_pair)
+        self._chroma_was_on = False
+
+    def _chroma_pair(self, frame: np.ndarray):
+        return self.chroma.process_pair(frame)   # thread-safe: o alfa vem com a imagem
+
+    @property
+    def chroma_fps(self) -> float:
+        """Imagens recortadas novas por segundo (o que realmente sai)."""
+        return self._chroma_stage.fps
+
+    def _aligned_ai_mask(self) -> np.ndarray | None:
+        """Máscara da IA (calculada no frame raw) recortada/espelhada como a imagem de saída."""
+        m = self.ai_mask_raw
+        if m is None:
+            return None
+        h, w = m.shape[:2]
+        x0, y0, cw, ch = self.crop_rect()
+        if cw < 0.999:
+            m = m[int(y0 * h): int((y0 + ch) * h), int(x0 * w): int((x0 + cw) * w)]
+        if self.settings["mirror"] and self.settings["flip"]:
+            m = cv2.flip(m, -1)
+        elif self.settings["mirror"]:
+            m = cv2.flip(m, 1)
+        elif self.settings["flip"]:
+            m = cv2.flip(m, 0)
+        return np.ascontiguousarray(m)
 
     # --- PTZ digital -----------------------------------------------------------
     def set_eptz(self, cx: float, cy: float, scale: float) -> None:
@@ -111,6 +205,16 @@ class Pipeline:
             frame = self._temporal_denoise(frame, min(level, 3))
         else:
             self._prev = None
+        ck = s.get("chroma", {})
+        if ck.get("enabled"):
+            self.chroma.ai_mask = self._aligned_ai_mask()
+            if not self._chroma_was_on:
+                self._chroma_stage.reset()
+            frame, self.alpha = self._chroma_stage.exchange(frame)
+            self._chroma_was_on = True
+        else:
+            self.alpha = None
+            self._chroma_was_on = False
         amt = float(s["sharpen"])
         if amt > 0:
             blur = cv2.GaussianBlur(frame, (0, 0), 1.3)
@@ -120,7 +224,7 @@ class Pipeline:
             frame = cv2.transform(frame, matrix)
         if lut is not None:
             frame = cv2.LUT(frame, lut)
-        if s["bg_blur"] and self.subject is not None:
+        if s["bg_blur"] and self.subject is not None and self.alpha is None:
             frame = self._background_blur(frame)
         return frame
 

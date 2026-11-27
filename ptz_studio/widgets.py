@@ -19,6 +19,7 @@ class PreviewWidget(QWidget):
     wheel_zoom = Signal(int)
     subject_selected = Signal(float, float, float, float)
     click_track = Signal(float, float)
+    color_pick = Signal(float, float)       # Alt + clique = conta-gotas do chroma
     double_clicked = Signal()
 
     def __init__(self, settings, parent=None) -> None:
@@ -103,6 +104,23 @@ class PreviewWidget(QWidget):
         if self._select_rect:
             p.setPen(QPen(QColor("#3ddc84"), 2, Qt.PenStyle.DashLine))
             p.drawRect(self._select_rect)
+        # mãos detetadas pela IA e gesto reconhecido
+        hands = self.meta.get("hands") or []
+        if hands:
+            from .gestures import GESTURES
+            p.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
+            for (hx, hy, hw, hh), gesture in hands:
+                hr = QRectF(r.x() + hx * r.width(), r.y() + hy * r.height(), hw * r.width(), hh * r.height())
+                p.setPen(QPen(QColor(61, 220, 132) if gesture else QColor(255, 255, 255, 120), 2 if gesture else 1))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(hr, 6, 6)
+                if gesture:
+                    p.drawText(QPointF(hr.x(), hr.y() - 6), GESTURES.get(gesture, gesture))
+        state = self.meta.get("state")
+        if state and state != "parado":
+            p.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+            p.setPen(ACCENT if state == "a seguir" else QColor("#ffcf5c"))
+            p.drawText(QPointF(r.right() - 160, r.y() + 24), f"◎ {state}")
         # histograma
         hist = self.meta.get("hist")
         if ov["hist"] and hist is not None:
@@ -134,6 +152,9 @@ class PreviewWidget(QWidget):
     def mousePressEvent(self, ev) -> None:
         self.setFocus()
         shift = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if ev.button() == Qt.MouseButton.LeftButton and ev.modifiers() & Qt.KeyboardModifier.AltModifier:
+            self.color_pick.emit(*self._norm(ev.position()))   # Alt + clique = conta-gotas do chroma
+            return
         if ev.button() == Qt.MouseButton.LeftButton and ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self.click_track.emit(*self._norm(ev.position()))  # Ctrl + clique = seguir este objeto
             return

@@ -18,6 +18,11 @@ NO_WINDOW = 0x08000000
 
 
 def find_ffmpeg() -> str | None:
+    import sys
+    if getattr(sys, "frozen", False):   # versão instalada: FFmpeg incluído
+        bundled = Path(getattr(sys, "_MEIPASS", "")) / "bin" / "ffmpeg.exe"
+        if bundled.exists():
+            return str(bundled)
     found = shutil.which("ffmpeg")
     if found:
         return found
@@ -47,13 +52,24 @@ def output_path(settings, kind: str, ext: str) -> Path:
     return path
 
 
-def save_image(img: np.ndarray, path: Path, fmt: str) -> Path:
+def save_image(img: np.ndarray, path: Path, fmt: str, alpha: np.ndarray | None = None) -> Path:
+    """Grava a foto; com `alpha` (chroma transparente) PNG/TIFF ficam com transparência.
+
+    Usa imencode + tofile porque o cv2.imwrite falha em silêncio com acentos no caminho.
+    """
+    if alpha is not None and fmt in ("png", "tiff"):
+        if alpha.shape[:2] != img.shape[:2]:
+            alpha = cv2.resize(alpha, (img.shape[1], img.shape[0]))
+        img = cv2.merge((*cv2.split(img), alpha))
     if fmt == "png":
-        cv2.imwrite(str(path), img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+        ok, buf = cv2.imencode(".png", img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
     elif fmt == "tiff":
-        cv2.imwrite(str(path), img)
+        ok, buf = cv2.imencode(".tiff", img)
     else:
-        cv2.imwrite(str(path), img, [cv2.IMWRITE_JPEG_QUALITY, 100, cv2.IMWRITE_JPEG_OPTIMIZE, 1])
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 100, cv2.IMWRITE_JPEG_OPTIMIZE, 1])
+    if not ok:
+        raise RuntimeError(f"não foi possível codificar a imagem ({fmt})")
+    buf.tofile(str(path))
     return path
 
 
@@ -96,6 +112,7 @@ CODECS = {
     "hevc_qsv": "H.265 - Intel QSV (ficheiros menores)",
     "libx264": "H.264 - CPU (compatível)",
     "mjpeg": "MJPEG intra (edição pesada sem perdas visíveis)",
+    "prores4444": "ProRes 4444 com transparência (chroma) - .mov",
 }
 
 
@@ -113,9 +130,13 @@ class Recorder:
             codec = "libx264" if encoder_available(ffmpeg, "libx264") else "h264_qsv"
         self.codec = codec
         w, h = size
+        self.wants_alpha = codec == "prores4444"   # a captura envia BGRA (alfa do chroma)
+        if self.wants_alpha and path.suffix.lower() != ".mov":
+            path = path.with_suffix(".mov")
+            self.path = path
         # Envia YUV 4:2:0 já convertido (OpenCV SIMD): metade dos bytes e o FFmpeg não converte cor
-        self._yuv = codec != "mjpeg" and w % 2 == 0 and h % 2 == 0
-        pix_in = "yuv420p" if self._yuv else "bgr24"
+        self._yuv = codec not in ("mjpeg", "prores4444") and w % 2 == 0 and h % 2 == 0
+        pix_in = "yuv420p" if self._yuv else ("bgra" if self.wants_alpha else "bgr24")
         cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                "-thread_queue_size", "64", "-use_wallclock_as_timestamps", "1",
                "-f", "rawvideo", "-pix_fmt", pix_in, "-s", f"{w}x{h}", "-color_range", "tv", "-i", "-"]
@@ -128,6 +149,9 @@ class Recorder:
             cmd += ["-c:v", codec, "-preset", "medium", "-global_quality", str(q), "-pix_fmt", "nv12"]
         elif codec == "mjpeg":
             cmd += ["-c:v", "mjpeg", "-q:v", "2", "-pix_fmt", "yuvj422p"]
+        elif codec == "prores4444":
+            cmd += ["-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le",
+                    "-alpha_bits", "8", "-vendor", "apl0", "-qscale:v", "9"]
         else:
             cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(q), "-pix_fmt", "yuv420p"]
         if audio_device:
@@ -141,6 +165,8 @@ class Recorder:
         self.started = dt.datetime.now()
 
     def write(self, frame: np.ndarray) -> None:
+        if self.wants_alpha and frame.ndim == 3 and frame.shape[2] == 3:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2BGRA)
         if (frame.shape[1], frame.shape[0]) != self.size:
             frame = cv2.resize(frame, self.size)
         try:

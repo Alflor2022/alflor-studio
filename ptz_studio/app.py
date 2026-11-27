@@ -18,11 +18,20 @@ from PySide6.QtWidgets import (
     QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import APP_NAME, __version__
+import queue
+
+from . import APP_NAME, __version__, models
+from .ai import AIWorker
 from .bridge import Bridge, BridgeError
 from .capture import CaptureThread
+from .chroma import BACKGROUNDS as CHROMA_BG
+from .chroma import KEY_COLORS, auto_key
+from .chroma import MODES as CHROMA_MODES
+from .chroma import VIEWS as CHROMA_VIEWS
 from .config import APP_DATA, Settings
-from .integrations import Gamepad, OBSLink, apply_update, check_update, restart_app
+from .gestures import ACTIONS as GESTURE_ACTIONS
+from .gestures import GESTURES
+from .integrations import Gamepad, OBSLink, apply_update, check_update, restart_app, scene_commands
 from .media import CODECS, Recorder, VirtualCam, best_sharpness, find_ffmpeg, output_path, save_image, stack_frames
 from .pipeline import LOOKS, Pipeline
 from .ptz import EASINGS, DigitalBackend, Keyframe, PhysicalBackend, PTZController
@@ -44,6 +53,10 @@ Home / H .......... posição inicial   Esc ...... parar tudo
 Espaço ............ foto     R ...... gravar     T ...... tracking
 G grelha · Z zebras · P peaking · N noite · B desfoque · M espelho
 F11 / duplo clique . ecrã inteiro     Ctrl+P ...... reproduzir travelling
+K ................. chroma on/off      Ctrl+M ...... mesa de realização
+Alt + clique ...... conta-gotas do chroma (cor do ecrã verde)
+Gestos (IA): 👌 OK = seguir quem fez · ✋ palma = parar · ✌ = foto
+Mesa: 1–8 preview · Ctrl+1–8 programa · Espaço CUT · Enter AUTO · F FTB
 Rato: clique = centrar ali · arrastar = mover · roda = zoom
        Ctrl + clique = seguir esse objeto (contorno automático)
        botão direito arrastado (ou Shift + arrastar) = escolher sujeito
@@ -54,7 +67,7 @@ QSS = """
 * { font-family: 'Segoe UI'; font-size: 10pt; color: #e8ecf2; }
 QMainWindow, QWidget { background: #0e1116; }
 QTabWidget::pane { border: 1px solid #2a313c; border-radius: 6px; top: -1px; }
-QTabBar::tab { background: #151a21; padding: 7px 12px; border: 1px solid #2a313c; border-bottom: none;
+QTabBar::tab { background: #151a21; padding: 6px 7px; border: 1px solid #2a313c; border-bottom: none;
                border-top-left-radius: 6px; border-top-right-radius: 6px; margin-right: 2px; color: #8b95a5; }
 QTabBar::tab:selected { background: #1d232c; color: #ff8a3d; }
 QGroupBox { border: 1px solid #2a313c; border-radius: 6px; margin-top: 14px; padding: 8px; }
@@ -87,8 +100,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME} {__version__}")
         self.resize(1500, 900)
         self.pipeline = Pipeline(self.settings["pipeline"])
-        self.tracker = SubjectTracker()
+        self.ai = AIWorker()   # MediaPipe numa thread própria (só calcula o que estiver ligado)
+        self.tracker = SubjectTracker(self.settings["tracking"], self.ai)
         self.tracker.mode = self.settings["tracking"]["mode"] if self.settings["tracking"]["mode"] != "subject" else "face"
+        self.switcher = None
+        self._obs_scenes: queue.Queue = queue.Queue()
         self.ptz = PTZController(self.settings, self)
         self.framer = AutoFramer(self.settings["tracking"], self.ptz, self.pipeline)
         self.obs = OBSLink()
@@ -155,7 +171,16 @@ class MainWindow(QMainWindow):
         self.btn_track.toggled.connect(self.set_tracking)
         btn_home = QPushButton("⌂  Início", objectName="big", toolTip="Home")
         btn_home.clicked.connect(lambda: self.ptz.home())
-        for b in (self.btn_photo, self.btn_rec, self.btn_track, btn_home):
+        self.btn_gest = QPushButton("👌  Gestos", objectName="big", checkable=True,
+                                    toolTip="Comandar com gestos: 👌 OK = seguir quem fez o gesto · ✋ palma = parar")
+        self.btn_gest.setChecked(bool(self.settings["tracking"].get("gestures")))
+        self.btn_gest.toggled.connect(self.set_gestures)
+        self.btn_chroma = QPushButton("🟩  Chroma", objectName="big", checkable=True, toolTip="Ligar/desligar o chroma key (K)")
+        self.btn_chroma.setChecked(bool(self.settings["pipeline"]["chroma"].get("enabled")))
+        self.btn_chroma.toggled.connect(self.set_chroma)
+        btn_mesa = QPushButton("🎬  Mesa", objectName="big", toolTip="Mesa de realização multi-câmara (Ctrl+M)")
+        btn_mesa.clicked.connect(self.open_switcher)
+        for b in (self.btn_photo, self.btn_rec, self.btn_track, self.btn_gest, self.btn_chroma, btn_home, btn_mesa):
             top.addWidget(b)
         root.addLayout(top)
 
@@ -167,12 +192,16 @@ class MainWindow(QMainWindow):
         self.preview.wheel_zoom.connect(self._wheel_zoom)
         self.preview.subject_selected.connect(self.select_subject)
         self.preview.click_track.connect(self.track_at)
+        self.preview.color_pick.connect(self.pick_chroma_color)
         self.preview.double_clicked.connect(self.toggle_fullscreen)
         split.addWidget(self.preview)
         self.tabs = QTabWidget()
         self.tabs.setMinimumWidth(400)
         self.tabs.setMaximumWidth(520)
-        for title, builder in (("PTZ", self._tab_ptz), ("Imagem", self._tab_image), ("Tracking", self._tab_tracking),
+        self.tabs.setMaximumWidth(640)
+        self.tabs.tabBar().setExpanding(False)
+        for title, builder in (("PTZ", self._tab_ptz), ("Imagem", self._tab_image), ("Chroma", self._tab_chroma),
+                               ("Tracking", self._tab_tracking),
                                ("Captura", self._tab_capture), ("Travelling", self._tab_travel),
                                ("Ligações", self._tab_links), ("Sistema", self._tab_system)):
             scroll = QScrollArea(widgetResizable=True)
@@ -362,6 +391,258 @@ class MainWindow(QMainWindow):
                 self.hw_form.addRow(label, row)
 
     # --- Tracking ------------------------------------------------------------------------
+    def _tab_chroma(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        ck = self.settings["pipeline"]["chroma"]
+        g = QGroupBox("Chroma key / recorte do fundo")
+        f = QFormLayout(g)
+        self.chk_chroma = QCheckBox("Ativo (K)")
+        self.chk_chroma.setChecked(bool(ck.get("enabled")))
+        self.chk_chroma.toggled.connect(lambda v: self.btn_chroma.setChecked(v))
+        f.addRow(self.chk_chroma)
+        cmb_mode = QComboBox()
+        for k, v in CHROMA_MODES.items():
+            cmb_mode.addItem(v, k)
+        cmb_mode.setCurrentIndex(max(0, cmb_mode.findData(ck["mode"])))
+        cmb_mode.currentIndexChanged.connect(lambda _i: (ck.__setitem__("mode", cmb_mode.currentData()), self._sync_ai_wants()))
+        f.addRow("Modo", cmb_mode)
+        krow = QHBoxLayout()
+        self.cmb_key = QComboBox()
+        for label, key in (("Verde", "green"), ("Azul", "blue"), ("Personalizada", "custom")):
+            self.cmb_key.addItem(label, key)
+        self.cmb_key.setCurrentIndex(max(0, self.cmb_key.findData(ck["key"])))
+        self.cmb_key.currentIndexChanged.connect(self._chroma_key_changed)
+        self.lbl_swatch = QLabel()
+        self.lbl_swatch.setFixedSize(28, 22)
+        b_auto = QPushButton("Calibrar automaticamente")
+        b_auto.clicked.connect(self.auto_calibrate_chroma)
+        krow.addWidget(self.cmb_key, 1)
+        krow.addWidget(self.lbl_swatch)
+        krow.addWidget(b_auto)
+        f.addRow("Cor", krow)
+        f.addRow(QLabel("Conta-gotas: Alt + clique no fundo, na imagem.", objectName="hint"))
+        self.chroma_sliders = {}
+        for key, label, lo, hi, scale in (("similarity", "Semelhança", 5, 400, 1000.0), ("smoothness", "Suavidade", 5, 300, 1000.0),
+                                           ("spill", "Supressão de spill", 0, 100, 100.0), ("choke", "Contrair contorno (px)", 0, 6, 1.0),
+                                           ("feather", "Esbater contorno", 0, 80, 10.0), ("light_wrap", "Light wrap (+12 ms)", 0, 100, 100.0)):
+            s = self._slider(lo, hi, int(float(ck[key]) * scale), lambda v, k=key: ck.__setitem__(k, v), scale)
+            self.chroma_sliders[key] = (s, scale)
+            f.addRow(label, s)
+        lay.addWidget(g)
+
+        g2 = QGroupBox("Garbage matte (cortar zonas fora do ecrã verde)")
+        f2 = QFormLayout(g2)
+        for i, label in enumerate(("Esquerda", "Topo", "Direita", "Base")):
+            f2.addRow(label, self._slider(0, 45, int(ck["garbage"][i] * 100),
+                                          lambda v, i=i: ck["garbage"].__setitem__(i, v), 100.0))
+        lay.addWidget(g2)
+
+        g3 = QGroupBox("Fundo")
+        f3 = QFormLayout(g3)
+        cmb_bg = QComboBox()
+        for k, v in CHROMA_BG.items():
+            cmb_bg.addItem(v, k)
+        cmb_bg.setCurrentIndex(max(0, cmb_bg.findData(ck["bg"])))
+        cmb_bg.currentIndexChanged.connect(lambda _i: ck.__setitem__("bg", cmb_bg.currentData()))
+        f3.addRow("Tipo", cmb_bg)
+        brow = QHBoxLayout()
+        b_color = QPushButton("Cor…")
+        b_color.clicked.connect(self._chroma_bg_color)
+        b_file = QPushButton("Imagem / vídeo…")
+        b_file.clicked.connect(self._chroma_bg_file)
+        brow.addWidget(b_color)
+        brow.addWidget(b_file)
+        f3.addRow(brow)
+        self.lbl_bgfile = QLabel(Path(ck["bg_path"]).name if ck.get("bg_path") else "", objectName="hint")
+        f3.addRow(self.lbl_bgfile)
+        f3.addRow("Desfocar fundo", self._slider(0, 30, int(ck["bg_blur"]), lambda v: ck.__setitem__("bg_blur", int(v))))
+        f3.addRow(QLabel("«Transparente» grava PNG com alfa e ProRes 4444 (.mov) e alimenta o cenário virtual da Mesa.",
+                         objectName="hint", wordWrap=True))
+        lay.addWidget(g3)
+
+        g4 = QGroupBox("Vista e desempenho")
+        f4 = QFormLayout(g4)
+        cmb_view = QComboBox()
+        for k, v in CHROMA_VIEWS.items():
+            cmb_view.addItem(v, k)
+        cmb_view.setCurrentIndex(max(0, cmb_view.findData(ck["view"])))
+        cmb_view.currentIndexChanged.connect(lambda _i: ck.__setitem__("view", cmb_view.currentData()))
+        f4.addRow("Vista", cmb_view)
+        chk_gpu = QCheckBox("Acelerar com a GPU (OpenCL)")
+        chk_gpu.setChecked(bool(ck.get("gpu", True)))
+        chk_gpu.toggled.connect(lambda v: ck.__setitem__("gpu", v))
+        f4.addRow(chk_gpu)
+        self.lbl_chroma_perf = QLabel("", objectName="hint")
+        f4.addRow(self.lbl_chroma_perf)
+        lay.addWidget(g4)
+        lay.addStretch(1)
+        self._update_swatch()
+        return w
+
+    def _update_swatch(self) -> None:
+        b, g_, r = self.settings["pipeline"]["chroma"].get("color", [60, 180, 60])
+        self.lbl_swatch.setStyleSheet(f"background: rgb({r},{g_},{b}); border:1px solid #2a313c; border-radius:4px;")
+
+    def _chroma_key_changed(self, _i: int) -> None:
+        ck = self.settings["pipeline"]["chroma"]
+        key = self.cmb_key.currentData()
+        ck["key"] = key
+        if key in KEY_COLORS:
+            ck["color"] = list(KEY_COLORS[key])
+        self._update_swatch()
+
+    def set_chroma(self, on: bool) -> None:
+        self.settings["pipeline"]["chroma"]["enabled"] = on
+        for w in (self.btn_chroma, getattr(self, "chk_chroma", None)):
+            if w is not None and w.isChecked() != on:
+                w.blockSignals(True)
+                w.setChecked(on)
+                w.blockSignals(False)
+        self._sync_ai_wants()
+        self.statusBar().showMessage("Chroma ligado" if on else "Chroma desligado", 2000)
+
+    def auto_calibrate_chroma(self) -> None:
+        img = self.capture.latest(processed=False) if self.capture else None
+        if img is None:
+            return
+        ck = self.settings["pipeline"]["chroma"]
+        key = "blue" if ck["key"] == "blue" else "green"
+        found = auto_key(img, key)
+        if not found:
+            QMessageBox.information(self, APP_NAME, "Não encontrei um ecrã verde/azul suficientemente grande na imagem.")
+            return
+        ck["color"], ck["similarity"] = found
+        s, scale = self.chroma_sliders["similarity"]
+        s.setValue(int(ck["similarity"] * scale))
+        self._update_swatch()
+        self.statusBar().showMessage(f"Chroma calibrado: cor {ck['color']} · semelhança {ck['similarity']:.3f}", 5000)
+
+    def pick_chroma_color(self, u: float, v: float) -> None:
+        img = self.capture.latest(processed=False) if self.capture else None
+        if img is None:
+            return
+        x, y = self.pipeline.out_to_raw(u, v)
+        h, w = img.shape[:2]
+        cx, cy = int(x * (w - 1)), int(y * (h - 1))
+        patch = img[max(0, cy - 6): cy + 7, max(0, cx - 6): cx + 7].reshape(-1, 3)
+        ck = self.settings["pipeline"]["chroma"]
+        ck["color"] = [int(c) for c in np.median(patch, axis=0)]
+        ck["key"] = "custom"
+        self.cmb_key.blockSignals(True)
+        self.cmb_key.setCurrentIndex(self.cmb_key.findData("custom"))
+        self.cmb_key.blockSignals(False)
+        self._update_swatch()
+        self.statusBar().showMessage(f"Cor do chroma: BGR {ck['color']}", 4000)
+
+    def _chroma_bg_color(self) -> None:
+        from PySide6.QtWidgets import QColorDialog
+        ck = self.settings["pipeline"]["chroma"]
+        b, g_, r = ck["bg_color"]
+        c = QColorDialog.getColor(QColor(r, g_, b), self, "Cor de fundo")
+        if c.isValid():
+            ck["bg_color"] = [c.blue(), c.green(), c.red()]
+            ck["bg"] = "color" if ck["bg"] == "transparent" else ck["bg"]
+
+    def _chroma_bg_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Fundo", str(Path.home()),
+                                              "Imagens e vídeos (*.png *.jpg *.jpeg *.webp *.bmp *.mp4 *.mov *.mkv *.avi *.webm)")
+        if path:
+            ck = self.settings["pipeline"]["chroma"]
+            ck["bg_path"] = path
+            ck["bg"] = "video" if Path(path).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi", ".webm") else "image"
+            self.lbl_bgfile.setText(Path(path).name)
+
+    def _sync_ai_wants(self) -> None:
+        ck = self.settings["pipeline"]["chroma"]
+        self.ai.want["segment"] = bool(ck.get("enabled") and ck.get("mode") in ("ai", "hybrid") and self.ai.available)
+
+    def _update_models_label(self) -> None:
+        miss = models.missing()
+        if not self.ai.available:
+            self.lbl_models.setText("MediaPipe não instalado: a app usa os detetores clássicos.")
+            self.btn_models.setVisible(False)
+        elif miss:
+            self.lbl_models.setText("Modelos em falta: " + ", ".join(models.MODELS[k]["label"] for k in miss))
+            self.btn_models.setVisible(True)
+        else:
+            self.lbl_models.setText("Modelos de IA: todos instalados ✓")
+            self.btn_models.setVisible(False)
+
+    def download_models(self) -> None:
+        self.btn_models.setEnabled(False)
+        self.lbl_models.setText("A descarregar modelos (Google MediaPipe / OpenCV Zoo)…")
+
+        def work():
+            res = models.download_all()
+            self.notify.emit("Modelos: " + ", ".join(f"{k} {v}" for k, v in res.items()))
+            QTimer.singleShot(0, lambda: (self.btn_models.setEnabled(True), self._update_models_label(),
+                                          self.tracker.load_yunet(), self._update_detector_label()))
+        threading.Thread(target=work, daemon=True).start()
+
+    def set_gestures(self, on: bool) -> None:
+        self.settings["tracking"]["gestures"] = on
+        for w in (self.btn_gest, getattr(self, "chk_gestures", None)):
+            if w is not None and w.isChecked() != on:
+                w.blockSignals(True)
+                w.setChecked(on)
+                w.blockSignals(False)
+        if on and not self.ai.available:
+            self.statusBar().showMessage("Os gestos precisam do MediaPipe (IA), que não está disponível", 5000)
+        else:
+            self.statusBar().showMessage("Gestos ligados: 👌 OK = seguir · ✋ palma = parar" if on else "Gestos desligados", 4000)
+
+    def _handle_gesture(self, ev, owner) -> None:
+        body, head = owner
+        action = self.settings["tracking"].get("gesture_actions", {}).get(ev.gesture, "none")
+        label = GESTURES.get(ev.gesture, ev.gesture)
+        if action == "none":
+            return
+        if action in ("track_start", "track_toggle") and (action == "track_start" or not self.tracker.enabled):
+            if body is not None:
+                mode = "person" if self.tracker.use_ai else "subject"
+                self.tracker.lock_on(body, mode)
+            else:  # sem pose: escolhe o rosto mais próximo da mão
+                hx, hy = ev.hand_center
+                self.tracker.lock_on((max(0.0, hx - 0.12), max(0.0, hy - 0.35), 0.24, 0.3), "face")
+            self.cmb_track_mode.blockSignals(True)
+            self.cmb_track_mode.setCurrentIndex(max(0, self.cmb_track_mode.findData(self.tracker.mode)))
+            self.cmb_track_mode.blockSignals(False)
+            self._update_detector_label()
+            self.set_tracking(True)
+        elif action in ("track_stop", "track_toggle"):
+            self.set_tracking(False)
+        elif action == "photo":
+            self.take_photo("timer3")
+        elif action == "record_toggle":
+            self.toggle_record()
+        elif action == "home":
+            self.ptz.home()
+        elif action == "preset_next":
+            used = sorted(int(n) for n in self.settings.device_presets(self.device))
+            if used:
+                cur = getattr(self, "_gp_preset", 0)
+                cur = used[(used.index(cur) + 1) % len(used)] if cur in used else used[0]
+                self._gp_preset = cur
+                self.recall_preset(cur)
+        self.statusBar().showMessage(f"Gesto {label} → {GESTURE_ACTIONS.get(action, action)}", 4000)
+
+    # --- mesa de realização -----------------------------------------------------------------
+    def open_switcher(self) -> None:
+        if self.switcher is None:
+            from .switcher_ui import SwitcherWindow
+            self.switcher = SwitcherWindow(self)
+            if self.remote:
+                self.remote.program_source = self.switcher.program_jpeg
+        self.switcher.show()
+        self.switcher.raise_()
+        self.switcher.activateWindow()
+
+    def on_switcher_closed(self) -> None:
+        self.switcher = None
+        if self.remote:
+            self.remote.program_source = None
+
     def _tab_tracking(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -393,13 +674,49 @@ class MainWindow(QMainWindow):
         chk_az.toggled.connect(lambda v: t.__setitem__("auto_zoom", v))
         f.addRow(chk_az)
         f.addRow("Reatividade", self._slider(0, 100, int(t["sensitivity"] * 100), lambda v: t.__setitem__("sensitivity", v), 100.0))
-        chk_lost = QCheckBox("Voltar ao início se perder o sujeito")
+        chk_rec = QCheckBox("Procurar quando o perde (volta à última posição onde o viu)")
+        chk_rec.setChecked(t.get("recover", True))
+        chk_rec.toggled.connect(lambda v: t.__setitem__("recover", v))
+        f.addRow(chk_rec)
+        chk_lost = QCheckBox("Voltar ao início se continuar perdido (5 s)")
         chk_lost.setChecked(t["lost_home"])
         chk_lost.toggled.connect(lambda v: t.__setitem__("lost_home", v))
         f.addRow(chk_lost)
+        chk_ai = QCheckBox("Usar IA (MediaPipe) — pessoas, gestos, recorte")
+        chk_ai.setChecked(t.get("ai", True))
+        chk_ai.setEnabled(self.ai.available)
+        chk_ai.toggled.connect(lambda v: (t.__setitem__("ai", v), self._update_detector_label()))
+        f.addRow(chk_ai)
         self.lbl_detector = QLabel("", objectName="hint")
         f.addRow("Detetor", self.lbl_detector)
+        self.lbl_track_state = QLabel("parado", objectName="hint")
+        f.addRow("Estado", self.lbl_track_state)
         lay.addWidget(g)
+
+        gg = QGroupBox("Gestos (IA) — o alvo comanda a câmara")
+        fg = QFormLayout(gg)
+        self.chk_gestures = QCheckBox("Reconhecer gestos")
+        self.chk_gestures.setChecked(bool(t.get("gestures")))
+        self.chk_gestures.toggled.connect(lambda v: self.btn_gest.setChecked(v))
+        fg.addRow(self.chk_gestures)
+        acts = t.setdefault("gesture_actions", {})
+        for g_key, g_label in GESTURES.items():
+            cmb = QComboBox()
+            for a_key, a_label in GESTURE_ACTIONS.items():
+                cmb.addItem(a_label, a_key)
+            cmb.setCurrentIndex(max(0, cmb.findData(acts.get(g_key, "none"))))
+            cmb.currentIndexChanged.connect(lambda _i, k=g_key, c=cmb: acts.__setitem__(k, c.currentData()))
+            fg.addRow(g_label, cmb)
+        fg.addRow(QLabel("Mantenha o gesto ~0,6 s, de frente para a câmara. Depois de um gesto há 2,5 s de pausa "
+                         "para evitar repetições. 👌 OK escolhe como alvo a pessoa que o fez.",
+                         objectName="hint", wordWrap=True))
+        self.lbl_models = QLabel("", objectName="hint", wordWrap=True)
+        fg.addRow(self.lbl_models)
+        self.btn_models = QPushButton("Descarregar modelos de IA em falta")
+        self.btn_models.clicked.connect(self.download_models)
+        fg.addRow(self.btn_models)
+        self._update_models_label()
+        lay.addWidget(gg)
 
         g2 = QGroupBox("Precisão")
         v = QVBoxLayout(g2)
@@ -748,20 +1065,43 @@ class MainWindow(QMainWindow):
         self.preview.composition = self.framer.target_point(self.tracker.mode) if self.tracker.enabled else (0.5, 0.5)
         self.preview.set_frame(img, meta)
         if self.btn_track.isChecked():  # só enquadra se o tracking estiver ligado (não só o desfoque)
-            self.framer.step(meta.get("raw_box"), self.tracker.mode)
+            self.framer.step(meta.get("raw_box"), self.tracker.mode, head=self.tracker.head)
 
     def _ui_tick(self) -> None:
         if self.capture:
             w, h = self.capture.size
-            self.lbl_stats.setText(f"{w}×{h} · {self.capture.fps:4.1f} fps · {self.ptz.state()['backend']}")
+            extra = ""
+            if self.ai.active():
+                ms = self.ai.results.timings
+                extra = " · IA " + " ".join(f"{k} {v:.0f}ms" for k, v in ms.items())
+            self.lbl_stats.setText(f"{w}×{h} · {self.capture.fps:4.1f} fps · {self.ptz.state()['backend']}{extra}")
         if self.recorder:
             secs = int((time.time() - self.recorder.started.timestamp()))
             self.preview.rec_time = f"{secs // 3600:02d}:{secs % 3600 // 60:02d}:{secs % 60:02d}"
         if self.remote:
             while not self.remote.commands.empty():
                 self._remote_command(self.remote.commands.get_nowait())
+        while not self.tracker.events.empty():      # gestos reconhecidos na thread de captura
+            ev, owner = self.tracker.events.get_nowait()
+            self._handle_gesture(ev, owner)
+        while not self._obs_scenes.empty():          # cenas do OBS com etiquetas [seguir], [preset 2]…
+            for cmd in scene_commands(self._obs_scenes.get_nowait()):
+                self._remote_command(cmd)
         self._poll_gamepad()
         self._calibration_tick()
+        if hasattr(self, "_tick_slow"):
+            self._tick_slow += 1
+        else:
+            self._tick_slow = 0
+        if self._tick_slow % 15 == 0:  # ~2× por segundo
+            self.lbl_track_state.setText(self.tracker.state if self.tracker.enabled else "parado")
+            ck = self.settings["pipeline"]["chroma"]
+            if ck.get("enabled"):
+                self.lbl_chroma_perf.setText(f"{self.pipeline.chroma_fps:.0f} imagens/s · {self.pipeline.chroma.last_ms:.0f} ms/frame · "
+                                             f"{'GPU (OpenCL)' if ck.get('gpu', True) and self.pipeline.chroma._gpu() else 'CPU'}"
+                                             " · 2 threads em paralelo")
+            else:
+                self.lbl_chroma_perf.setText("desligado")
 
     def _on_ptz_changed(self, st: dict) -> None:
         self.lbl_pos.setText(f"P {st.get('pan', 0):.0f} · T {st.get('tilt', 0):.0f} · Z {st.get('zoom', 0):.0f}")
@@ -910,6 +1250,7 @@ class MainWindow(QMainWindow):
     # ================================================================== tracking
     def set_tracking(self, on: bool) -> None:
         self.tracker.enabled = on or self.settings["pipeline"]["bg_blur"]
+        self.framer.reset()
         if not on:
             if not self.tracker.enabled:
                 self.tracker.reset()
@@ -1141,18 +1482,25 @@ class MainWindow(QMainWindow):
         fmt = ph["format"]
         snapshot = {k: self.settings[k] for k in ("output_dir", "project", "scene", "take")}
 
+        transparent = processed and self.pipeline.chroma.transparent
+
         def work():
             try:
+                alpha = None
                 if mode == "burst":
                     img = best_sharpness(cap.grab(int(ph["burst"]), processed))
                 elif mode == "stack":
                     self.notify.emit(f"A empilhar {ph['stack']} frames - mantenha a câmara parada…")
                     img = stack_frames(cap.grab(int(ph["stack"]), processed))
+                elif transparent:   # chroma com fundo transparente → PNG/TIFF com alfa
+                    img, alpha = cap.latest_with_alpha()
                 else:
                     img = cap.latest(processed)
                 if img is None:
                     raise RuntimeError("sem frame")
-                path = save_image(img, output_path(snapshot, "photo", fmt), fmt)
+                if transparent and alpha is None:
+                    alpha = cap.latest_alpha()
+                path = save_image(img, output_path(snapshot, "photo", fmt), fmt, alpha if transparent else None)
                 self.photo_saved.emit(str(path))
             except Exception as exc:
                 self.notify.emit(f"Falha na foto: {exc}")
@@ -1212,7 +1560,10 @@ class MainWindow(QMainWindow):
                 self.cmb_scene.setCurrentText(current)
             except Exception:
                 pass
-            self.lbl_obs.setText("✓ ligado ao OBS")
+            triggers = ""
+            if self.settings["obs"].get("scene_triggers", True) and self.obs.start_events(self._obs_scenes.put):
+                triggers = " · gatilhos de cena ativos ([seguir], [parar], [preset N]…)"
+            self.lbl_obs.setText("✓ ligado ao OBS" + triggers)
         else:
             self.lbl_obs.setText(self.obs.error)
 
@@ -1259,7 +1610,9 @@ class MainWindow(QMainWindow):
             base = url.split("/?")[0]
             self.txt_remote.setPlainText(
                 f"Telemóvel:  {url}\n"
+                f"Painel no OBS (Docas › Docas de browser personalizadas):  http://127.0.0.1:{r['port']}/dock?k={k}\n"
                 f"VLC (stream):  {base}/stream.mjpg?k={k}\n"
+                f"Programa da Mesa (VLC):  {base}/program.mjpg?k={k}\n"
                 f"Foto (Companion):  {base}/api/cmd?k={k}&a=photo\n"
                 f"Preset 1:  {base}/api/cmd?k={k}&a=preset&n=1\n"
                 f"Gravar:  {base}/api/cmd?k={k}&a=record")
@@ -1296,6 +1649,9 @@ class MainWindow(QMainWindow):
             "tracking": self.tracker.enabled, "night": self.settings["pipeline"]["night"],
             "bg_blur": self.settings["pipeline"]["bg_blur"],
             "presets": [int(n) for n in self.settings.device_presets(self.device)], "ptz": self.ptz.state(),
+            "track_state": self.tracker.state, "gestures": bool(self.settings["tracking"].get("gestures")),
+            "chroma": bool(self.settings["pipeline"]["chroma"].get("enabled")),
+            "switcher": self.switcher.state() if self.switcher else None,
         }
 
     def _remote_command(self, cmd: dict) -> None:
@@ -1331,6 +1687,32 @@ class MainWindow(QMainWindow):
             self.cmb_look.setCurrentIndex((self.cmb_look.currentIndex() + 1) % self.cmb_look.count())
         elif a == "look":
             self.cmb_look.setCurrentText(cmd.get("name", "Natural"))
+        elif a in ("track_on", "track_off"):
+            self.set_tracking(a == "track_on")
+        elif a == "gestures":
+            self.set_gestures(not self.settings["tracking"].get("gestures"))
+        elif a in ("chroma", "chroma_on", "chroma_off"):
+            self.set_chroma(not self.settings["pipeline"]["chroma"]["enabled"] if a == "chroma" else a == "chroma_on")
+        elif a in ("record_on", "record_off"):
+            self.toggle_record(a == "record_on")
+        elif a.startswith("sw_"):
+            if self.switcher is None:
+                if a == "sw_program":   # um gatilho [cam N] abre a mesa automaticamente
+                    self.open_switcher()
+                else:
+                    return
+            eng = self.switcher.engine
+            n = int(num("n", 1)) - 1
+            if a == "sw_program" and 0 <= n < 8:
+                eng.set_program(n)
+            elif a == "sw_preview" and 0 <= n < 8:
+                eng.set_preview(n)
+            elif a == "sw_cut":
+                eng.cut()
+            elif a == "sw_auto":
+                eng.auto()
+            elif a == "sw_ftb":
+                eng.toggle_ftb()
 
     # ================================================================== comando de jogo
     def _poll_gamepad(self) -> None:
@@ -1412,7 +1794,11 @@ class MainWindow(QMainWindow):
             Qt.Key.Key_G: lambda: ov["grid"].toggle(), Qt.Key.Key_Z: lambda: ov["zebra"].toggle(),
             Qt.Key.Key_N: lambda: self.chk_night.toggle(), Qt.Key.Key_B: lambda: self.chk_blur.toggle(),
             Qt.Key.Key_M: lambda: self.chk_mirror.toggle(), Qt.Key.Key_F11: self.toggle_fullscreen,
+            Qt.Key.Key_K: lambda: self.set_chroma(not self.settings["pipeline"]["chroma"]["enabled"]),
         }
+        if key == Qt.Key.Key_M and ctrl:
+            self.open_switcher()
+            return True
         if key == Qt.Key.Key_P:
             self.play_travel() if ctrl else ov["peaking"].toggle()
             return True
@@ -1468,6 +1854,8 @@ class MainWindow(QMainWindow):
 
     # ================================================================== fecho
     def closeEvent(self, ev) -> None:
+        if self.switcher:
+            self.switcher.close()
         if self.recorder:
             rec = self.recorder
             self.toggle_record(False)
@@ -1475,6 +1863,8 @@ class MainWindow(QMainWindow):
         if self.remote:
             self.remote.stop()
         self._stop_capture()
+        self.ai.stop()
+        self.pipeline.chroma.close()
         if self.bridge:
             self.bridge.shutdown()
         self.obs.disconnect()

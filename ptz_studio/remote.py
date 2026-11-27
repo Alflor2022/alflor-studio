@@ -33,6 +33,7 @@ class RemoteServer:
         self.commands: queue.Queue = queue.Queue()
         self._frame_source = frame_source   # () -> bytes JPEG
         self._state_source = state_source   # () -> dict
+        self.program_source = None          # () -> bytes JPEG do programa da mesa (opcional)
         server = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -62,10 +63,17 @@ class RemoteServer:
                     return
                 if url.path in ("/", "/index.html"):
                     self._send(200, (WEB_DIR / "remote.html").read_bytes(), "text/html; charset=utf-8")
+                elif url.path == "/dock":  # painel compacto para o OBS (Custom Browser Dock)
+                    self._send(200, (WEB_DIR / "dock.html").read_bytes(), "text/html; charset=utf-8")
                 elif url.path == "/snapshot.jpg":
                     self._send(200, server._frame_source(), "image/jpeg")
                 elif url.path == "/stream.mjpg":
-                    self._stream()
+                    self._stream(server._frame_source)
+                elif url.path == "/program.mjpg":   # saída da mesa de realização (VLC, telemóvel)
+                    if server.program_source is None:
+                        self.send_error(404, "Mesa de realização fechada")
+                    else:
+                        self._stream(server.program_source)
                 elif url.path == "/api/state":
                     self._send(200, json.dumps(server._state_source()).encode(), "application/json")
                 elif url.path == "/api/cmd":  # GET simples para Companion/Stream Deck
@@ -92,7 +100,7 @@ class RemoteServer:
                 server.commands.put(cmd)
                 self._send(200, b'{"ok":true}', "application/json")
 
-            def _stream(self):
+            def _stream(self, source):
                 self.send_response(200)
                 self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
                 self.send_header("Cache-Control", "no-store")
@@ -100,7 +108,7 @@ class RemoteServer:
                 import time
                 try:
                     while server.running:
-                        jpg = server._frame_source()
+                        jpg = source() if source else b""
                         if jpg:
                             self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n")
                         time.sleep(1 / 15)

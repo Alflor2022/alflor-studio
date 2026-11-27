@@ -1,0 +1,27 @@
+ALFLOR STUDIO — instalação no Windows 10/11 (64 bits)
+=====================================================
+
+1. Extraia o ficheiro .zip completo para uma pasta (botão direito › Extrair tudo).
+2. Faça duplo clique em «Instalar.cmd».
+   - Instala para o seu utilizador em %LOCALAPPDATA%\Programs\Alflor Studio
+   - Não pede administrador.
+   - Cria atalhos no Ambiente de Trabalho e no Menu Iniciar.
+3. Na primeira vez que ativar o controlo pelo telemóvel, o Windows pergunta pela
+   firewall: permita em «Redes privadas».
+
+Sem instalar (modo portátil): abra «Alflor Studio\Alflor Studio.exe» diretamente.
+
+Incluído: FFmpeg (gravação), modelos de IA MediaPipe/YuNet (tracking, gestos,
+recorte), ponte PTZ para câmaras USB UVC.
+
+Recomendado instalar à parte: OBS Studio (+ plugins obs-ptz e obs-face-tracker)
+se quiser usar a câmara virtual e o painel dentro do OBS.
+
+Desinstalar: Definições do Windows › Aplicações › Alflor Studio › Desinstalar
+(as definições e as gravações são mantidas).
+
+Atualizações: a aplicação verifica sozinha as novas versões em
+https://github.com/Alflor2022/alflor-studio/releases
+
+Licença: MIT (Alflor Studio). FFmpeg: GPL (https://ffmpeg.org). Modelos MediaPipe e
+OpenCV Zoo: Apache 2.0.

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alflor Studio · Painel OBS</title>
+<style>
+  :root { --bg:#1e1e2a; --panel:#272735; --line:#3a3a4e; --text:#e8ecf2; --dim:#9aa0b0; --accent:#ff8a3d; --rec:#ff3b4a; --pvw:#3ddc84; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:12px/1.3 system-ui, "Segoe UI", sans-serif; user-select:none; }
+  .wrap { padding:6px; display:grid; gap:6px; }
+  h4 { margin:4px 0 2px; font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); }
+  .row { display:grid; gap:4px; }
+  .c2 { grid-template-columns:repeat(2,1fr); } .c3 { grid-template-columns:repeat(3,1fr); }
+  .c4 { grid-template-columns:repeat(4,1fr); } .c6 { grid-template-columns:repeat(6,1fr); }
+  button { border:1px solid var(--line); background:var(--panel); color:var(--text); border-radius:5px; padding:7px 2px; font:inherit; font-weight:600; cursor:pointer; }
+  button:active { filter:brightness(1.3); }
+  .on { border-color:var(--accent); color:var(--accent); }
+  .pgm { background:#5a1d24; border-color:var(--rec); color:#fff; }
+  .pvw { background:#1d4a2e; border-color:var(--pvw); color:#fff; }
+  .rec { color:var(--rec); }
+  .st { color:var(--dim); font-size:11px; }
+  .pad { display:grid; grid-template-columns:repeat(3,1fr); gap:3px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="st" id="st">a ligar ao Alflor Studio…</div>
+  <h4>Tracking</h4>
+  <div class="row c2">
+    <button id="track" data-a="track">◎ Seguir</button>
+    <button id="gest" data-a="gestures">👌 Gestos</button>
+  </div>
+  <h4>Câmara</h4>
+  <div class="row c2">
+    <div class="pad">
+      <span></span><button data-h="0,1">▲</button><span></span>
+      <button data-h="-1,0">◀</button><button data-a="home">⌂</button><button data-h="1,0">▶</button>
+      <span></span><button data-h="0,-1">▼</button><span></span>
+    </div>
+    <div class="row">
+      <button data-z="0.6">Zoom ＋</button><button data-z="-0.6">Zoom －</button>
+    </div>
+  </div>
+  <div class="row c6" id="presets"></div>
+  <h4>Captura e imagem</h4>
+  <div class="row c3">
+    <button data-a="photo">📷 Foto</button>
+    <button class="rec" id="rec" data-a="record">● REC</button>
+    <button id="chroma" data-a="chroma">🟩 Chroma</button>
+  </div>
+  <h4>Mesa de realização</h4>
+  <div class="st">Programa</div>
+  <div class="row c4" id="pgm"></div>
+  <div class="st">Pré-visualização</div>
+  <div class="row c4" id="pvw"></div>
+  <div class="row c3">
+    <button data-a="sw_cut">CUT</button><button data-a="sw_auto">AUTO</button><button id="ftb" data-a="sw_ftb">FTB</button>
+  </div>
+</div>
+<script>
+const K = new URLSearchParams(location.search).get("k") || "";
+const q = (p) => p + (p.includes("?") ? "&" : "?") + "k=" + encodeURIComponent(K);
+const send = (cmd) => fetch(q("/api/cmd"), {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(cmd)}).catch(()=>{});
+document.querySelectorAll("[data-a]").forEach(b => b.onclick = () => send({a:b.dataset.a}));
+document.querySelectorAll("[data-h]").forEach(b => {
+  const [x, y] = b.dataset.h.split(",").map(Number);
+  b.onpointerdown = () => send({a:"vel", pan:x*0.6, tilt:y*0.6});
+  b.onpointerup = b.onpointerleave = () => send({a:"vel", pan:0, tilt:0});
+});
+document.querySelectorAll("[data-z]").forEach(b => {
+  b.onpointerdown = () => send({a:"vel", zoom:+b.dataset.z});
+  b.onpointerup = b.onpointerleave = () => send({a:"vel", zoom:0});
+});
+const pre = document.getElementById("presets");
+for (let i = 1; i <= 6; i++) { const b = document.createElement("button"); b.textContent = i; b.onclick = () => send({a:"preset", n:i}); pre.appendChild(b); }
+const pg = document.getElementById("pgm"), pv = document.getElementById("pvw");
+for (let i = 1; i <= 8; i++) {
+  const a = document.createElement("button"); a.textContent = i; a.onclick = () => send({a:"sw_program", n:i}); pg.appendChild(a);
+  const b = document.createElement("button"); b.textContent = i; b.onclick = () => send({a:"sw_preview", n:i}); pv.appendChild(b);
+}
+async function poll() {
+  try {
+    const s = await (await fetch(q("/api/state"))).json();
+    document.getElementById("st").textContent = `${s.device} · ${s.fps} fps` + (s.tracking ? ` · ${s.track_state || "a seguir"}` : "") + (s.rec_time ? ` · REC ${s.rec_time}` : "");
+    document.getElementById("track").classList.toggle("on", !!s.tracking);
+    document.getElementById("gest").classList.toggle("on", !!s.gestures);
+    document.getElementById("chroma").classList.toggle("on", !!s.chroma);
+    document.getElementById("rec").classList.toggle("on", !!s.recording);
+    const sw = s.switcher;
+    [...pg.children].forEach((b, i) => { b.className = sw && sw.program === i ? "pgm" : ""; b.title = sw ? (sw.labels[i] || "") : ""; });
+    [...pv.children].forEach((b, i) => { b.className = sw && sw.preview === i ? "pvw" : ""; b.title = sw ? (sw.labels[i] || "") : ""; });
+    document.getElementById("ftb").classList.toggle("pgm", !!(sw && sw.ftb));
+  } catch (e) { document.getElementById("st").textContent = "Alflor Studio desligado ou controlo remoto inativo"; }
+}
+setInterval(poll, 800); poll();
+</script>
+</body>
+</html>

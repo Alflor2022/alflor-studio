@@ -23,17 +23,20 @@ class CaptureThread(QThread):
 
     PREVIEW_W = 1280
 
-    def __init__(self, index: int, settings, pipeline: Pipeline, tracker, parent=None) -> None:
+    def __init__(self, index: int, settings, pipeline: Pipeline, tracker, parent=None, emit_preview: bool = True) -> None:
         super().__init__(parent)
         self.index = index
         self.settings = settings
         self.pipeline = pipeline
         self.tracker = tracker
-        self.sinks: list = []                   # objetos com .write(frame)
+        self.emit_preview = emit_preview         # False nas câmaras extra da mesa (poupa CPU)
+        self.sinks: list = []                   # objetos com .write(frame) (ou .wants_alpha → BGRA)
         self._running = True
         self._lock = threading.Lock()
         self._latest_raw: np.ndarray | None = None
         self._latest_out: np.ndarray | None = None
+        self._latest_alpha: np.ndarray | None = None
+        self._checker: np.ndarray | None = None
         self._grab_requests: list[tuple[int, list, threading.Event]] = []
         self._jpeg_cache: tuple[float, bytes] = (0.0, b"")
         self.fps = 0.0
@@ -48,6 +51,16 @@ class CaptureThread(QThread):
         with self._lock:
             img = self._latest_out if processed else self._latest_raw
             return None if img is None else img.copy()
+
+    def latest_alpha(self) -> np.ndarray | None:
+        """Alfa do chroma do último frame (uint8) ou None se o chroma estiver desligado."""
+        with self._lock:
+            return None if self._latest_alpha is None else self._latest_alpha.copy()
+
+    def latest_with_alpha(self) -> tuple[np.ndarray | None, np.ndarray | None]:
+        with self._lock:
+            img, a = self._latest_out, self._latest_alpha
+            return (None if img is None else img.copy()), (None if a is None else a.copy())
 
     def grab(self, count: int, processed: bool = False, timeout: float = 10.0) -> list[np.ndarray]:
         """Recolhe os próximos N frames consecutivos (foto por empilhamento)."""
@@ -123,13 +136,21 @@ class CaptureThread(QThread):
                         return
                 continue
             failures = 0
+            ai = getattr(self.tracker, "ai", None) if self.tracker else None
+            if ai is not None:
+                ai.submit(frame)                  # a IA corre em paralelo; usa o último resultado
+                self.pipeline.ai_mask_raw = ai.results.mask if ai.want.get("segment") else None
             box = self.tracker.update(frame) if self.tracker else None
             self.pipeline.subject = box
             self.pipeline.subject_kind = self.tracker.mode if self.tracker else "face"
             out = self.pipeline.process(frame)
+            alpha = self.pipeline.alpha
+            if alpha is not None and alpha.shape[:2] != out.shape[:2]:
+                alpha = cv2.resize(alpha, (out.shape[1], out.shape[0]))
             with self._lock:
                 self._latest_raw = frame
                 self._latest_out = out
+                self._latest_alpha = alpha
                 pending = []
                 for req in self._grab_requests:
                     count, bucket, ev, processed = req
@@ -139,15 +160,39 @@ class CaptureThread(QThread):
                     else:
                         pending.append(req)
                 self._grab_requests = pending
+            bgra = None
             for sink in list(self.sinks):
                 try:
-                    sink.write(out)
+                    if getattr(sink, "wants_alpha", False):   # ex.: ProRes 4444 com transparência
+                        if bgra is None:
+                            a = alpha if alpha is not None else np.full(out.shape[:2], 255, np.uint8)
+                            bgra = cv2.merge((*cv2.split(out), a))
+                        sink.write(bgra)
+                    else:
+                        sink.write(out)
                 except Exception as exc:  # um destino com erro não pode parar a captura
                     self.status.emit(f"Erro em {type(sink).__name__}: {exc}")
                     self.sinks.remove(sink)
+            if not self.emit_preview:
+                frames += 1
+                now = time.monotonic()
+                if now - t_last >= 1.0:
+                    self.fps = frames / (now - t_last)
+                    frames, t_last = 0, now
+                continue
             # pré-visualização
             ph = int(out.shape[0] * self.PREVIEW_W / out.shape[1])
             prev = cv2.resize(out, (self.PREVIEW_W, ph), interpolation=cv2.INTER_AREA)
+            ck = self.settings["pipeline"].get("chroma", {})
+            if alpha is not None and ck.get("bg") == "transparent" and ck.get("view") == "composite":
+                # transparência visível ao operador: xadrez por trás do sujeito
+                if self._checker is None or self._checker.shape[:2] != prev.shape[:2]:
+                    from .chroma import checkerboard
+                    self._checker = checkerboard(prev.shape[1], prev.shape[0])
+                a_small = cv2.resize(alpha, (prev.shape[1], prev.shape[0]), interpolation=cv2.INTER_AREA)
+                a3 = cv2.merge((a_small, a_small, a_small))
+                prev = cv2.add(cv2.multiply(prev, a3, scale=1 / 255.0),
+                               cv2.multiply(self._checker, cv2.bitwise_not(a3), scale=1 / 255.0))
             ov = self.settings["overlays"]
             if ov["peaking"]:
                 apply_peaking(prev)
@@ -163,7 +208,13 @@ class CaptureThread(QThread):
                 frames = 0
                 t_last = now
             out_box = self.pipeline.box_raw_to_out(box) if box else None
-            self.frame_ready.emit(img, {"box": out_box, "raw_box": box, "hist": hist, "fps": self.fps})
+            meta = {"box": out_box, "raw_box": box, "hist": hist, "fps": self.fps}
+            if self.tracker is not None:
+                meta["head"] = self.tracker.head
+                meta["state"] = self.tracker.state
+                if self.tracker.hands:   # mãos e gestos (coords de saída) para desenhar
+                    meta["hands"] = [(self.pipeline.box_raw_to_out(h.box), h.gesture) for h in self.tracker.hands]
+            self.frame_ready.emit(img, meta)
         cap.release()
         with self._lock:
             for _, _, ev, _ in self._grab_requests:

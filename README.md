@@ -21,9 +21,12 @@ Premiere/CapCut, Stream Deck e câmara virtual (Zoom, Teams, Meet…).
 | **Presets** | 9 por câmara, com miniatura e nome, transição suave com curva (Linear, Suave, Cinema, Acelerar, Travar). |
 | **Travelling** | Trajetórias ponto a ponto com duração, pausa e curva por ponto; reprodução única ou em ciclo; guardar/abrir. |
 | **Movimentos de realizador** | Push-in, pull-out, panorâmica, revelação em tilt, arco, chicote (whip pan), crash zoom. |
-| **Tracking** | Rosto (Haar ou IA YuNet), pessoa (HOG + CSRT) ou qualquer objeto escolhido (CSRT). Composição ao centro ou nos terços, *headroom* correto, plano (grande plano → plano geral) com zoom automático, reatividade ajustável, regresso ao início se perder o sujeito. Funciona com motores reais **ou** em PTZ digital. |
+| **Tracking com e sem IA** | Rosto (YuNet → Haar), pessoa (IA MediaPipe Pose com cabeça para *headroom*, ou HOG + CSRT sem IA) ou qualquer objeto escolhido (CSRT). **Identidade**: não salta para outra pessoa que passe. **Recuperação**: se o alvo se perde, procura-o em todo o ecrã (forma + cor) e a câmara volta à última posição onde o viu. Composição ao centro ou nos terços, *headroom* correto, plano (grande plano → plano geral) com zoom automático, reatividade ajustável, regresso ao início se perder o sujeito. Funciona com motores reais **ou** em PTZ digital. |
 | **Calibração** | Mede automaticamente quantas unidades de pan/tilt correspondem ao ecrã e a ampliação ótica do zoom (correlação de fase + ORB), para cliques e tracking precisos. |
 | **Imagem (hardware)** | Brilho, contraste, saturação, nitidez, tonalidade, balanço de brancos (manual/auto) e, se a câmara tiver, foco, exposição, íris, ganho. Gerados automaticamente para cada câmara. |
+| **Gestos (IA)** | 👌 OK inicia o tracking **na pessoa que fez o gesto**, ✋ palma aberta para, ✌ vitória tira uma foto; 👍 e ✊ configuráveis. Gesto confirmado após ~0,6 s estável, com pausa de 2,5 s contra repetições. |
+| **Chroma key** | Verde/azul/cor personalizada (conta-gotas Alt+clique, calibração automática), semelhança, suavidade, supressão de spill, contração e esbatimento do contorno, garbage matte, light wrap. Modos **Chroma**, **IA sem ecrã verde** e **Híbrido** (chroma nos contornos + IA para retirar objetos). Fundo transparente (PNG com alfa, **ProRes 4444**), cor, imagem, vídeo em ciclo ou desfocado. Acelerado pela GPU Intel (OpenCL) em 2 threads: 25 imagens/s a 1080p. |
+| **Mesa de realização** | Até 8 entradas (câmara principal, outras câmaras USB/telemóvel/HDMI, imagens, vídeos, barras). PROGRAMA/PREVIEW, CUT, AUTO, T-bar, transições Mix/Dip/Wipe/Push, FTB, PiP, **cenário virtual** (chroma por cima de outra entrada), logótipo e oráculo. Multiview com tally, controlo PTZ da câmara em preview, gravação e câmara virtual do programa. |
 | **Imagem (software)** | Redução de ruído temporal (3 níveis), modo noite (levanta sombras), nitidez extra, looks (Vivo, Quente, Frio, Cinema, Suave, P&B, Alto contraste), desfoque de fundo que segue o sujeito, espelho/inversão. |
 | **Monitorização** | Grelha de terços, áreas seguras, zebras (sobre-exposição), *focus peaking*, histograma. |
 | **Fotografia** | PNG sem perdas, JPEG 100 ou TIFF; temporizador 3/10 s; **burst** (escolhe automaticamente o frame mais nítido); **empilhamento noturno** (média de N frames → muito menos ruído). |
@@ -36,6 +39,14 @@ Premiere/CapCut, Stream Deck e câmara virtual (Zoom, Teams, Meet…).
 
 ## Instalação
 
+### Noutro PC (recomendado)
+
+Descarregue `AlflorStudio-<versão>-win64.zip` em [Releases](https://github.com/Alflor2022/alflor-studio/releases),
+extraia e faça duplo clique em **`Instalar.cmd`** (sem administrador; cria atalhos). Inclui FFmpeg, modelos de IA e a
+ponte PTZ — não é preciso Python. As atualizações seguintes instalam-se sozinhas a partir da app.
+
+### A partir do código
+
 Requisitos: Windows 10/11, Python 3.11–3.13, FFmpeg (`winget install Gyan.FFmpeg`).
 
 ```powershell
@@ -46,6 +57,9 @@ cd alflor-studio
 
 Na primeira execução o `.bat` cria o ambiente `.venv` e instala as dependências. A ponte nativa
 DirectShow (`ptzbridge.cs`) é compilada automaticamente com o compilador C# que já vem com o Windows.
+Os modelos de IA descarregam-se no separador Tracking («Descarregar modelos de IA em falta»).
+
+Gerar o executável e o zip: `powershell -ExecutionPolicy Bypass -File packaging\build.ps1` → `dist\`.
 
 ## Atalhos
 
@@ -57,6 +71,9 @@ Home / H .......... posição inicial   Esc ...... parar tudo
 Espaço ............ foto     R ...... gravar     T ...... tracking
 G grelha · Z zebras · P peaking · N noite · B desfoque · M espelho
 F11 / duplo clique . ecrã inteiro     Ctrl+P ...... reproduzir travelling
+K ................. chroma on/off      Ctrl+M ...... mesa de realização
+Ctrl + clique ..... seguir esse objeto  Alt + clique . conta-gotas do chroma
+Mesa: 1–8 preview · Ctrl+1–8 programa · Espaço CUT · Enter AUTO · F FTB · P PiP
 ```
 
 ## Trabalhar com outras ferramentas
@@ -65,6 +82,10 @@ F11 / duplo clique . ecrã inteiro     Ctrl+P ...... reproduzir travelling
   [obs-face-tracker](https://github.com/norihiro/obs-face-tracker). O Alflor Studio controla a câmara **mesmo quando o OBS a está a usar**
   (a ponte DirectShow funciona em paralelo). Para usar o tracking/looks do Alflor Studio dentro do OBS, ative a câmara virtual.
   Para ligar por WebSocket: OBS › Ferramentas › Definições do servidor WebSocket › Ativar.
+- **Painel dentro do OBS** – OBS › Docas › Docas de browser personalizadas › URL `http://127.0.0.1:8765/dock?k=TOKEN`
+  (tracking, gestos, câmara, presets, foto/REC, chroma e mesa, tudo a partir do OBS).
+- **Gatilhos de cena do OBS** – etiquetas no nome da cena comandam o Alflor Studio quando ela vai para o ar:
+  `[seguir]` `[parar]` `[preset 2]` `[inicio]` `[gravar]` `[parar gravacao]` `[cam 3]` `[chroma]` `[sem chroma]`.
 - **Premiere Pro / CapCut / DaVinci** – os ficheiros ficam em `Vídeos\Alflor Studio\AAAA-MM-DD\{Fotos,Videos}` com nomes de projeto, cena e take.
   Para edição pesada use o codec *MJPEG intra*.
 - **VLC** – Abrir fluxo de rede: `http://IP:8765/stream.mjpg?k=TOKEN` (mostrado no separador Ligações).
@@ -83,6 +104,9 @@ F11 / duplo clique . ecrã inteiro     Ctrl+P ...... reproduzir travelling
 | `motion` | `kind` (`push_in`, `pull_out`, `pan_sweep`, `tilt_reveal`, `orbit_feel`, `whip_pan`, `crash_zoom`), `duration` |
 | `zoom` | `value` (0–100 %), `duration` |
 | `look` | `name` |
+| `track_on`, `track_off`, `gestures`, `chroma`, `chroma_on`, `chroma_off`, `record_on`, `record_off` | – |
+| `sw_program`, `sw_preview` | `n` (1–8) — mesa de realização |
+| `sw_cut`, `sw_auto`, `sw_ftb` | – |
 
 ## Outras câmaras
 
@@ -114,12 +138,17 @@ ptz_studio/
   ptz.py                controlador: velocidade, absoluto, easing, travellings, PTZ digital
   capture.py            thread de captura → processamento → pré-visualização/gravação/vcam/remoto
   pipeline.py           ruído, noite, nitidez, looks, desfoque, zebras, peaking, histograma
-  tracking.py           deteção/seguimento + AutoFramer (composição, plano, zoom automático)
+  tracking.py           deteção/seguimento com identidade e recuperação + AutoFramer
+  ai.py, gestures.py    IA MediaPipe numa thread própria (mãos, pose, rostos, recorte) e gestos
+  chroma.py             chroma key / recorte IA (GPU OpenCL, 2 threads)
+  switcher.py, switcher_ui.py   mesa de realização multi-câmara
+  models.py             modelos de IA (incluídos no .exe ou descarregados)
   media.py              fotos, empilhamento, burst, gravador FFmpeg, câmara virtual
   remote.py, web/       servidor Wi-Fi: página do telemóvel, MJPEG, API
   integrations.py       OBS WebSocket, comando XInput, atualização automática
   app.py, widgets.py    interface PySide6
-tests/                  teste de hardware, benchmark do gravador, teste da câmara virtual
+packaging/              PyInstaller (.exe), instalador e build.ps1
+tests/                  unitários, chroma, ao vivo, hardware, gravador, câmara virtual
 ```
 
 ## Testes
@@ -128,8 +157,12 @@ tests/                  teste de hardware, benchmark do gravador, teste da câma
 .venv\Scripts\python.exe tests\hardware_test.py "UVC Camera"   # move a câmara! fps, calibração, fotos, vídeo, remoto, tracking
 .venv\Scripts\python.exe tests\recorder_bench.py libx264
 .venv\Scripts\python.exe tests\vcam_test.py
+.venv\Scripts\python.exe tests\test_units.py                    # gestos, mesa, gatilhos OBS (sem câmara)
+.venv\Scripts\python.exe tests\test_chroma.py                   # precisão e desempenho do chroma
+.venv\Scripts\python.exe tests\live_test.py "UVC Camera" "Integrated Webcam"   # fps com chroma/IA e mesa
 ```
 
 ## Licença
 
 MIT. Os plugins do OBS referidos são projetos independentes (GPL-2.0) e não estão incluídos neste repositório.
+O pacote Windows inclui o FFmpeg (GPL) e modelos MediaPipe / OpenCV Zoo (Apache 2.0).

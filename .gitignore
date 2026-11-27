@@ -7,3 +7,4 @@ dist/
 build/
 *.spec
 .claude/
+!packaging/alflor_studio.spec

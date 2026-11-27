@@ -31,14 +31,26 @@ DEFAULTS: dict = {
     "pipeline": {
         "denoise": 0, "night": False, "night_gain": 1.8, "sharpen": 0.0,
         "look": "Natural", "bg_blur": False, "mirror": False, "flip": False,
+        "chroma": {
+            "enabled": False, "mode": "chroma", "key": "green", "color": [60, 180, 60],
+            "similarity": 0.10, "smoothness": 0.06, "spill": 0.7, "choke": 1, "feather": 1.5,
+            "garbage": [0.0, 0.0, 0.0, 0.0], "bg": "transparent", "bg_color": [40, 30, 20],
+            "bg_path": "", "bg_blur": 0, "light_wrap": 0.0, "view": "composite", "gpu": True,
+        },
     },
     "overlays": {"grid": True, "safe": False, "zebra": False, "peaking": False, "hist": True},
     "tracking": {
         "mode": "face", "target": "center", "shot": "Plano médio",
         "drive": "ptz", "auto_zoom": False, "sensitivity": 0.5, "lost_home": False,
+        "ai": True, "gestures": False, "recover": True,
+        "gesture_actions": {"ok": "track_start", "palm": "track_stop", "victory": "photo",
+                            "thumbs_up": "none", "fist": "none"},
     },
     "remote": {"enabled": False, "port": 8765, "token": ""},
-    "obs": {"auto_connect": True, "sync_record": False},
+    "obs": {"auto_connect": True, "sync_record": False, "scene_triggers": True},
+    "switcher": {"inputs": [], "transition": "mix", "duration": 1.0, "pip_corner": "tr",
+                 "pip_size": 0.3, "lower_title": "", "lower_sub": "", "logo_path": "",
+                 "logo_corner": "tr"},
     "vcam": False,
     "updates": {"check": True, "auto_apply": False, "last_check": 0},
     "presets": {},                  # por dispositivo: {"1": {"p":..,"t":..,"z":..,"name":..,"thumb":..}}

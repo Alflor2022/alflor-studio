@@ -161,15 +161,34 @@ def main() -> None:
         cal_now = Settings.load().device_calibration(DEVICE)
         framer = AutoFramer({"target": "center", "shot": "Plano médio", "auto_zoom": False, "sensitivity": 0.6, "lost_home": False}, ptz, pipeline)
         framer.calibration = cal_now
+        eventos = []
+        t0 = time.monotonic()
+        orig_search = tracker._search
+
+        def search_log(small):
+            r = orig_search(small)
+            if tracker._frame_i % 3 == 0:
+                eventos.append(f"{time.monotonic() - t0:.1f}s procura:{'sim' if r else 'não'}")
+            return r
+        tracker._search = search_log
         tracker.select(sel)
         wait(1.5)
         b0 = tracker.box
         track["inicio_centro"] = [round(b0[0] + b0[2] / 2, 3), round(b0[1] + b0[3] / 2, 3)] if b0 else None
         cv2.imwrite(str(OUT / "tracking_inicio.jpg"), cap.latest(False))
         t_end = time.monotonic() + 14
+        last = None
         while time.monotonic() < t_end:
             framer.step(tracker.box, "subject")
+            cur = (tracker.state, tracker._tracker is not None)
+            if cur != last:
+                eventos.append(f"{time.monotonic() - t0:.1f}s {cur[0]} {'csrt' if cur[1] else 'sem-csrt'} zoom={ptz.state().get('zoom', 0):.0f}")
+                last = cur
             wait(0.05)
+        tracker._search = orig_search
+        procuras = [e for e in eventos if "procura" in e]
+        track["eventos"] = [e for e in eventos if "procura" not in e][:20]
+        track["procuras"] = f"{len(procuras)} ({sum('sim' in e for e in procuras)} com sucesso)"
         b1 = tracker.box
         track["fim_centro"] = [round(b1[0] + b1[2] / 2, 3), round(b1[1] + b1[3] / 2, 3)] if b1 else None
         track["ptz_final"] = {k: round(v, 1) for k, v in ptz.state().items() if isinstance(v, float)}
