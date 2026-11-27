@@ -1,0 +1,217 @@
+"""Processamento de imagem em tempo real e ferramentas de monitorização.
+
+Ordem: recorte PTZ digital -> espelho -> modo noite -> redução de ruído temporal ->
+nitidez -> look de cor -> desfoco de fundo. Tudo com operações OpenCV rápidas para
+manter 1080p a 30 fps num portátil.
+"""
+from __future__ import annotations
+
+import threading
+
+import cv2
+import numpy as np
+
+LUMA = np.array([0.114, 0.587, 0.299], np.float32)  # pesos BGR
+
+
+def _sat_matrix(s: float) -> np.ndarray:
+    gray = np.tile(LUMA, (3, 1))
+    return (1 - s) * gray + s * np.eye(3, dtype=np.float32)
+
+
+def _curve_lut(contrast: float = 1.0, lift: float = 0.0) -> np.ndarray:
+    x = np.arange(256, dtype=np.float32) / 255.0
+    y = 0.5 + (x - 0.5) * contrast
+    y = lift + y * (1 - lift)
+    return np.clip(y * 255, 0, 255).astype(np.uint8)
+
+
+def _scurve_lut(strength: float) -> np.ndarray:
+    x = np.arange(256, dtype=np.float32) / 255.0
+    s = x * x * (3 - 2 * x)
+    y = x + (s - x) * strength
+    return np.clip(y * 255, 0, 255).astype(np.uint8)
+
+
+LOOKS: dict[str, tuple[np.ndarray | None, np.ndarray | None]] = {
+    "Natural": (None, None),
+    "Vivo": (_sat_matrix(1.3), _scurve_lut(0.35)),
+    "Quente": (np.diag([0.90, 1.0, 1.10]).astype(np.float32), None),
+    "Frio": (np.diag([1.10, 1.0, 0.92]).astype(np.float32), None),
+    "Cinema": (np.array([[1.08, 0.04, -0.06], [0.0, 1.0, 0.0], [-0.06, 0.02, 1.06]], np.float32) @ _sat_matrix(0.9), _scurve_lut(0.6)),
+    "Suave": (_sat_matrix(0.9), _curve_lut(0.85, 0.04)),
+    "Preto e branco": (np.tile(LUMA, (3, 1)).astype(np.float32), _scurve_lut(0.4)),
+    "Alto contraste": (None, _scurve_lut(1.0)),
+}
+
+
+class Pipeline:
+    def __init__(self, settings: dict) -> None:
+        self.settings = settings                 # referência a settings["pipeline"]
+        self._prev: np.ndarray | None = None
+        self._lock = threading.Lock()
+        self._eptz = (0.5, 0.5, 1.0)             # centro x, centro y (normalizados) e escala
+        self._eptz_smooth = [0.5, 0.5, 1.0]
+        self.subject: tuple[float, float, float, float] | None = None  # caixa em coords "raw"
+        self.subject_kind = "face"
+        self._gain_cache: dict[float, np.ndarray] = {}
+        self.frame_size = (1920, 1080)
+
+    # --- PTZ digital -----------------------------------------------------------
+    def set_eptz(self, cx: float, cy: float, scale: float) -> None:
+        with self._lock:
+            self._eptz = (cx, cy, max(1.0, scale))
+
+    def crop_rect(self) -> tuple[float, float, float, float]:
+        """Retângulo de recorte atual (x0, y0, w, h) normalizado no frame original."""
+        cx, cy, s = self._eptz_smooth
+        w = h = 1.0 / s
+        x0 = min(max(cx - w / 2, 0.0), 1.0 - w)
+        y0 = min(max(cy - h / 2, 0.0), 1.0 - h)
+        return x0, y0, w, h
+
+    def raw_to_out(self, x: float, y: float) -> tuple[float, float]:
+        x0, y0, w, h = self.crop_rect()
+        u, v = (x - x0) / w, (y - y0) / h
+        if self.settings["mirror"]:
+            u = 1 - u
+        if self.settings["flip"]:
+            v = 1 - v
+        return u, v
+
+    def out_to_raw(self, u: float, v: float) -> tuple[float, float]:
+        if self.settings["mirror"]:
+            u = 1 - u
+        if self.settings["flip"]:
+            v = 1 - v
+        x0, y0, w, h = self.crop_rect()
+        return x0 + u * w, y0 + v * h
+
+    def box_raw_to_out(self, box):
+        x, y, w, h = box
+        (u0, v0), (u1, v1) = self.raw_to_out(x, y), self.raw_to_out(x + w, y + h)
+        return min(u0, u1), min(v0, v1), abs(u1 - u0), abs(v1 - v0)
+
+    # --- processamento ---------------------------------------------------------
+    def process(self, frame: np.ndarray) -> np.ndarray:
+        s = self.settings
+        h, w = frame.shape[:2]
+        self.frame_size = (w, h)
+        frame = self._apply_eptz(frame)
+        if s["mirror"] and s["flip"]:
+            frame = cv2.flip(frame, -1)
+        elif s["mirror"]:
+            frame = cv2.flip(frame, 1)
+        elif s["flip"]:
+            frame = cv2.flip(frame, 0)
+        if s["night"]:
+            frame = cv2.LUT(frame, self._gain_lut(float(s["night_gain"])))
+        level = int(s["denoise"]) + (1 if s["night"] else 0)
+        if level > 0:
+            frame = self._temporal_denoise(frame, min(level, 3))
+        else:
+            self._prev = None
+        amt = float(s["sharpen"])
+        if amt > 0:
+            blur = cv2.GaussianBlur(frame, (0, 0), 1.3)
+            frame = cv2.addWeighted(frame, 1 + amt, blur, -amt, 0)
+        matrix, lut = LOOKS.get(s["look"], (None, None))
+        if matrix is not None:
+            frame = cv2.transform(frame, matrix)
+        if lut is not None:
+            frame = cv2.LUT(frame, lut)
+        if s["bg_blur"] and self.subject is not None:
+            frame = self._background_blur(frame)
+        return frame
+
+    def _apply_eptz(self, frame: np.ndarray) -> np.ndarray:
+        with self._lock:
+            target = self._eptz
+        sm = self._eptz_smooth
+        for i in range(3):  # suavização tipo "steadicam"
+            sm[i] += (target[i] - sm[i]) * 0.18
+            if abs(target[i] - sm[i]) < 1e-4:
+                sm[i] = target[i]
+        if sm[2] <= 1.0005:
+            return frame
+        h, w = frame.shape[:2]
+        x0, y0, cw, ch = self.crop_rect()
+        x, y = int(x0 * w), int(y0 * h)
+        crop = frame[y:y + max(2, int(ch * h)), x:x + max(2, int(cw * w))]
+        return cv2.resize(crop, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    def _gain_lut(self, gain: float) -> np.ndarray:
+        key = round(gain, 2)
+        if key not in self._gain_cache:
+            x = np.arange(256, dtype=np.float32) / 255.0
+            y = 1.0 - np.power(1.0 - x, gain)  # levanta sombras sem queimar altas luzes
+            self._gain_cache[key] = np.clip(y * 255, 0, 255).astype(np.uint8)
+        return self._gain_cache[key]
+
+    def _temporal_denoise(self, frame: np.ndarray, level: int) -> np.ndarray:
+        prev = self._prev
+        if prev is None or prev.shape != frame.shape:
+            self._prev = frame.copy()
+            return frame
+        alpha = (0.0, 0.5, 0.65, 0.8)[level]
+        thr = (0, 10, 16, 24)[level]
+        diff = cv2.cvtColor(cv2.absdiff(frame, prev), cv2.COLOR_BGR2GRAY)
+        _, still = cv2.threshold(diff, thr, 255, cv2.THRESH_BINARY_INV)  # zonas sem movimento
+        blended = cv2.addWeighted(prev, alpha, frame, 1 - alpha, 0)
+        out = frame.copy()
+        cv2.copyTo(blended, still, out)
+        self._prev = out
+        return out
+
+    def _background_blur(self, frame: np.ndarray) -> np.ndarray:
+        h, w = frame.shape[:2]
+        sw, sh = w // 4, h // 4
+        small = cv2.resize(frame, (sw, sh), interpolation=cv2.INTER_AREA)
+        blurred = cv2.resize(cv2.GaussianBlur(small, (0, 0), 7), (w, h), interpolation=cv2.INTER_LINEAR)
+        bx, by, bw, bh = self.box_raw_to_out(self.subject)
+        mask = np.zeros((sh, sw), np.float32)
+        if self.subject_kind == "face":   # do rosto estima-se o corpo
+            cx, cy = (bx + bw / 2) * sw, (by + bh * 2.6) * sh
+            axes = (bw * 1.9 * sw, bh * 3.9 * sh)
+        else:
+            cx, cy = (bx + bw / 2) * sw, (by + bh / 2) * sh
+            axes = (bw * 0.62 * sw, bh * 0.62 * sh)
+        cv2.ellipse(mask, (int(cx), int(cy)), (max(1, int(axes[0])), max(1, int(axes[1]))), 0, 0, 360, 1.0, -1)
+        mask = cv2.GaussianBlur(mask, (0, 0), max(1.0, sw * 0.035))
+        mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
+        return cv2.blendLinear(frame, blurred, mask, 1.0 - mask)
+
+
+# --- monitorização (apenas na pré-visualização) ------------------------------------
+_zebra_cache: dict[tuple[int, int], np.ndarray] = {}
+
+
+def apply_zebra(img: np.ndarray, threshold: int = 245) -> None:
+    h, w = img.shape[:2]
+    stripes = _zebra_cache.get((w, h))
+    if stripes is None:
+        yy, xx = np.mgrid[0:h, 0:w]
+        stripes = (((xx + yy) // 6) % 2 == 0).astype(np.uint8) * 255
+        _zebra_cache[(w, h)] = stripes
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, hot = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+    mask = cv2.bitwise_and(hot, stripes)
+    img[mask > 0] = (255, 0, 255)
+
+
+def apply_peaking(img: np.ndarray, threshold: int = 40) -> None:
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    lap = cv2.convertScaleAbs(cv2.Laplacian(cv2.GaussianBlur(gray, (3, 3), 0), cv2.CV_16S, ksize=3))
+    img[lap > threshold] = (0, 255, 80)
+
+
+def luma_histogram(img: np.ndarray, bins: int = 64) -> np.ndarray:
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    hist = cv2.calcHist([gray], [0], None, [bins], [0, 256]).ravel()
+    return hist / max(1.0, hist.max())
+
+
+def sharpness_score(img: np.ndarray) -> float:
+    """Medida de foco (variância do Laplaciano) - útil para focar manualmente a 5D."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())

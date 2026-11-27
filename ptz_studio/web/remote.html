@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0e1116">
+<title>PTZ Studio · Remoto</title>
+<style>
+  :root { --bg:#0e1116; --panel:#171b22; --line:#2a313c; --text:#e8ecf2; --dim:#8b95a5; --accent:#ff8a3d; --rec:#ff3b4a; --ok:#3ddc84; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; user-select:none; touch-action:manipulation; }
+  header { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--line); }
+  header b { letter-spacing:.04em; }
+  header .st { margin-left:auto; color:var(--dim); font-size:13px; font-variant-numeric:tabular-nums; }
+  .live { position:relative; background:#000; aspect-ratio:16/9; }
+  .live img { width:100%; height:100%; object-fit:contain; display:block; }
+  .badge { position:absolute; top:8px; left:8px; background:rgba(0,0,0,.6); padding:3px 8px; border-radius:4px; font-size:12px; }
+  .badge.rec { background:var(--rec); }
+  main { padding:12px; display:grid; gap:12px; }
+  .row { display:flex; gap:12px; align-items:stretch; }
+  .pad { position:relative; width:190px; height:190px; border-radius:50%; background:radial-gradient(circle,#1f2530 0,#141820 70%); border:1px solid var(--line); flex:none; touch-action:none; }
+  .knob { position:absolute; width:64px; height:64px; left:63px; top:63px; border-radius:50%; background:#2d3541; border:2px solid var(--accent); }
+  .zoom { flex:1; display:flex; flex-direction:column; gap:8px; }
+  button { appearance:none; border:1px solid var(--line); background:var(--panel); color:var(--text); border-radius:10px; padding:12px 8px; font:inherit; font-weight:600; }
+  button:active { background:#232a35; }
+  .zoom button { flex:1; font-size:22px; }
+  .grid3 { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .grid4 { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+  .big { font-size:17px; padding:16px 8px; }
+  .rec { color:var(--rec); }
+  .on { border-color:var(--accent); color:var(--accent); }
+  h3 { margin:6px 0 0; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); }
+  .hint { color:var(--dim); font-size:12px; }
+</style>
+</head>
+<body>
+<header><b>PTZ STUDIO</b><span class="hint">remoto</span><span class="st" id="st">a ligar…</span></header>
+<div class="live"><img id="live" alt="Imagem ao vivo"><span class="badge" id="badge">AO VIVO</span></div>
+<main>
+  <div class="row">
+    <div class="pad" id="pad"><div class="knob" id="knob"></div></div>
+    <div class="zoom">
+      <button id="zin">＋</button>
+      <button id="home">⌂</button>
+      <button id="zout">－</button>
+    </div>
+  </div>
+  <div class="grid3">
+    <button class="big" data-a="photo">📷 Foto</button>
+    <button class="big rec" data-a="record" id="recbtn">● REC</button>
+    <button class="big" data-a="track" id="trackbtn">◎ Seguir</button>
+  </div>
+  <h3>Presets · toque = ir · toque longo = guardar</h3>
+  <div class="grid3" id="presets"></div>
+  <h3>Movimentos</h3>
+  <div class="grid4">
+    <button data-m="push_in">Push-in</button>
+    <button data-m="pull_out">Pull-out</button>
+    <button data-m="pan_sweep">Panorâmica</button>
+    <button data-m="tilt_reveal">Revelar</button>
+    <button data-m="orbit_feel">Arco</button>
+    <button data-m="whip_pan">Chicote</button>
+    <button data-m="crash_zoom">Crash zoom</button>
+    <button data-a="stop">■ Parar</button>
+  </div>
+  <h3>Imagem</h3>
+  <div class="grid3">
+    <button data-a="night" id="nightbtn">🌙 Noite</button>
+    <button data-a="bgblur" id="blurbtn">◐ Desfoque</button>
+    <button data-a="look_next">🎨 Look</button>
+  </div>
+</main>
+<script>
+const K = new URLSearchParams(location.search).get("k") || "";
+const q = (p) => p + (p.includes("?") ? "&" : "?") + "k=" + encodeURIComponent(K);
+const send = (cmd) => fetch(q("/api/cmd"), {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(cmd)}).catch(()=>{});
+document.getElementById("live").src = q("/stream.mjpg");
+
+// joystick
+const pad = document.getElementById("pad"), knob = document.getElementById("knob");
+let active = false, last = 0;
+function moveKnob(x, y) { knob.style.left = (63 + x*63) + "px"; knob.style.top = (63 - y*63) + "px"; }
+function handle(e) {
+  const r = pad.getBoundingClientRect(), t = e.touches ? e.touches[0] : e;
+  let x = (t.clientX - r.left - r.width/2) / (r.width/2), y = -(t.clientY - r.top - r.height/2) / (r.height/2);
+  const m = Math.hypot(x, y); if (m > 1) { x /= m; y /= m; }
+  moveKnob(x, y);
+  const now = performance.now();
+  if (now - last > 70) { last = now; send({a:"vel", pan:+x.toFixed(2), tilt:+y.toFixed(2)}); }
+}
+function end() { if (!active) return; active = false; moveKnob(0, 0); send({a:"vel", pan:0, tilt:0}); }
+pad.addEventListener("pointerdown", e => { active = true; pad.setPointerCapture(e.pointerId); handle(e); });
+pad.addEventListener("pointermove", e => { if (active) handle(e); });
+pad.addEventListener("pointerup", end); pad.addEventListener("pointercancel", end);
+
+// zoom contínuo enquanto se carrega
+function hold(id, z) {
+  const b = document.getElementById(id);
+  b.addEventListener("pointerdown", () => send({a:"vel", zoom:z}));
+  ["pointerup","pointerleave","pointercancel"].forEach(ev => b.addEventListener(ev, () => send({a:"vel", zoom:0})));
+}
+hold("zin", 0.6); hold("zout", -0.6);
+document.getElementById("home").onclick = () => send({a:"home"});
+
+// botões de ação
+document.querySelectorAll("[data-a]").forEach(b => b.onclick = () => send({a:b.dataset.a}));
+document.querySelectorAll("[data-m]").forEach(b => b.onclick = () => send({a:"motion", kind:b.dataset.m}));
+
+// presets
+const pg = document.getElementById("presets");
+for (let i = 1; i <= 9; i++) {
+  const b = document.createElement("button"); b.textContent = i; b.dataset.n = i;
+  let timer = null, saved = false;
+  b.addEventListener("pointerdown", () => { saved = false; timer = setTimeout(() => { saved = true; send({a:"preset_save", n:i}); b.classList.add("on"); if (navigator.vibrate) navigator.vibrate(60); }, 700); });
+  b.addEventListener("pointerup", () => { clearTimeout(timer); if (!saved) send({a:"preset", n:i}); });
+  b.addEventListener("pointerleave", () => clearTimeout(timer));
+  pg.appendChild(b);
+}
+
+// estado
+async function poll() {
+  try {
+    const s = await (await fetch(q("/api/state"))).json();
+    document.getElementById("st").textContent = `${s.device} · ${s.fps} fps` + (s.rec_time ? ` · REC ${s.rec_time}` : "");
+    const badge = document.getElementById("badge");
+    badge.textContent = s.recording ? "● REC" : "AO VIVO"; badge.className = "badge" + (s.recording ? " rec" : "");
+    document.getElementById("trackbtn").classList.toggle("on", !!s.tracking);
+    document.getElementById("nightbtn").classList.toggle("on", !!s.night);
+    document.getElementById("blurbtn").classList.toggle("on", !!s.bg_blur);
+    document.querySelectorAll("#presets button").forEach(b => b.classList.toggle("on", (s.presets || []).includes(+b.dataset.n)));
+  } catch (e) { document.getElementById("st").textContent = "sem ligação"; }
+}
+setInterval(poll, 1000); poll();
+</script>
+</body>
+</html>
