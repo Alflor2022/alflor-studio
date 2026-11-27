@@ -39,8 +39,8 @@ Premiere/CapCut, Stream Deck e câmara virtual (Zoom, Teams, Meet…).
 Requisitos: Windows 10/11, Python 3.11–3.13, FFmpeg (`winget install Gyan.FFmpeg`).
 
 ```powershell
-git clone https://github.com/Alflor2022/ptz-studio.git
-cd ptz-studio
+git clone https://github.com/Alflor2022/alflor-studio.git
+cd alflor-studio
 .\"Alflor Studio.bat"
 ```
 
