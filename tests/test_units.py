@@ -118,7 +118,8 @@ eng.st.duration = 0.6
 eng.auto(); time.sleep(0.3)
 mid = px()
 check("AUTO a meio mistura as duas", 30 < mid[1] < 230 and 30 < mid[2] < 230, str(mid))
-check("AUTO termina no vermelho", until(lambda: px() == (0, 0, 255)), str(px()))
+# esperar o FIM da transição (barramentos trocados), não só o píxel: a 99,9 % já é vermelho puro
+check("AUTO termina no vermelho", until(lambda: not eng.st.running and eng.st.program == 0 and px() == (0, 0, 255)), str(px()))
 eng.set_tbar(0.5); time.sleep(0.12)
 check("T-bar a 50 % mistura", 60 < px()[1] < 200, str(px()))
 eng.set_tbar(1.0)

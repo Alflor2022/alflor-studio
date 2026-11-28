@@ -30,6 +30,8 @@ from ptz_studio.ptz import PhysicalBackend, PTZController  # noqa: E402
 from ptz_studio.remote import RemoteServer  # noqa: E402
 from ptz_studio.tracking import AutoFramer, SubjectTracker  # noqa: E402
 
+SAVE_CAL = "--guardar-calibracao" in sys.argv    # grava a calibração medida na configuração real
+sys.argv = [a for a in sys.argv if a != "--guardar-calibracao"]
 DEVICE = sys.argv[1] if len(sys.argv) > 1 else "UVC Camera"
 OUT = Path(sys.argv[2] if len(sys.argv) > 2 else Path.home() / "Videos" / "Alflor Studio" / "_teste")
 OUT.mkdir(parents=True, exist_ok=True)
@@ -49,6 +51,7 @@ def gray(img):
 def main() -> None:
     app = QApplication(sys.argv)
     settings = Settings.load()
+    settings.readonly = True          # o teste nunca escreve na configuração do utilizador
     settings["output_dir"] = str(OUT)
     bridge = Bridge()
     devs = bridge.list_devices()["video"]
@@ -104,7 +107,7 @@ def main() -> None:
     ptz.move_to(zoom=0); wait(5)
     results["calibracao"] = cal
     keep = {k: cal[k] for k in ("pan_fw", "tilt_fh", "zoom_max_mag") if cal.get(k)}
-    if keep:
+    if keep and SAVE_CAL:             # só com --guardar-calibracao
         saved = Settings.load()
         saved["calibration"].setdefault(DEVICE, {}).update(keep)
         saved.save()
@@ -124,7 +127,7 @@ def main() -> None:
     wait(6)
     cap.sinks.remove(rec)
     err = rec.stop()
-    probe = subprocess.run([ff.replace("ffmpeg.exe", "ffprobe.exe"), "-v", "error", "-show_entries", "format=duration:stream=codec_name,width,height,r_frame_rate",
+    probe = subprocess.run([str(Path(ff).with_name("ffprobe.exe")),"-v", "error", "-show_entries", "format=duration:stream=codec_name,width,height,r_frame_rate",
                             "-of", "json", str(rec.path)], capture_output=True, text=True)
     results["video"] = {"ficheiro": rec.path.name, "codec": rec.codec, "frames": rec.frames, "descartados": rec.dropped,
                         "erro": err[-200:], "probe": json.loads(probe.stdout or "{}")}

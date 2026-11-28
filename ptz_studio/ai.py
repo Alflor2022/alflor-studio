@@ -205,7 +205,9 @@ class AIWorker(threading.Thread):
             t0 = time.perf_counter()
             r = t.segment_for_video(image, self._ts_ms)
             m = r.confidence_masks[0].numpy_view()
-            res.mask = np.ascontiguousarray(m.reshape(m.shape[0], m.shape[1]))
+            # CÓPIA obrigatória: numpy_view() aponta para memória do MediaPipe que é libertada com `r`;
+            # sem cópia o chroma híbrido lia memória já libertada (crash 0xC0000005 no live_test)
+            res.mask = np.array(m.reshape(m.shape[0], m.shape[1]), dtype=np.float32, copy=True)
             res.timings["segment"] = (time.perf_counter() - t0) * 1000
         elif prev.mask is not None and not self.want["segment"]:
             res.mask = None

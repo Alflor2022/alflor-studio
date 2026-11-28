@@ -5,10 +5,10 @@
 
 | | |
 |---|---|
-| **Versão** | 0.3.0 |
+| **Versão** | 0.3.1 |
 | **Repositório** | [github.com/Alflor2022/alflor-studio](https://github.com/Alflor2022/alflor-studio) (público, MIT) |
 | **Pasta local** | `E:\Projetos\alflor-studio` |
-| **Instalador** | `AlflorStudio-0.3.0-win64.zip` (244,8 MB · instalado 610 MB) |
+| **Instalador** | `AlflorStudio-0.3.1-win64.zip` (244,8 MB · instalado 610 MB) |
 | **Tecnologia** | Python 3.13 · PySide6 (Qt) · OpenCV 4.14 contrib · MediaPipe 1.2.3 · FFmpeg · C# (DirectShow) · PyInstaller |
 | **Câmara de referência** | PTZ USB UVC (VID 27C2 / PID 052F), 1080p30, pan ±2000 · tilt ±900 · zoom 0–99 |
 
@@ -30,6 +30,7 @@ câmaras, tudo num único programa instalável noutro PC sem conhecimentos técn
 | 0.1.2 | Correções da demo ao vivo: tracking físico estável, Ctrl+clique para seguir, roda do rato, teclas «presas» ao perder o foco |
 | 0.2.0 | IA MediaPipe e gestos, recuperação do alvo, chroma key (GPU), mesa de realização multi-câmara, painel e gatilhos do OBS, temporizadores de foto e vídeo, ajuste inteligente (auto e referência), elementos ecrã/gravação/foto, executável e instalador |
 | **0.3.0** | Gravação **Log** (S-Log3, ProRes 422 HQ 10 bits) e LUT Log→Rec709; foto **RAW DNG** (16 bits lineares empilhados) e DNG+JPEG; perfil sRGB + EXIF + XMP em todas as fotos; revisão de fotos com estrelas; Lightroom (pasta de importação automática); máscara e original do chroma; exportar o look em .cube; histograma RGB com aviso de corte; guias de corte e fantasma; perfis da interface; **gravação sem perder frames** (25/25 fps) |
+| **0.3.1** | Correções do teste completo: crash no chroma Híbrido/IA (máscara da IA lida depois de libertada), crash ao trocar de resolução depressa (duas aberturas DirectShow em paralelo), balanço de brancos que ia a 15 000 K ao desligar o «Auto», botão ↺ que tirava a câmara do automático sem o mostrar, botão **Repor câmara**, testes que escreviam na configuração |
 
 ## 3. Funções
 
@@ -150,6 +151,9 @@ câmara ──► CaptureThread (capture.py) ──► Pipeline (pipeline.py):
 | Relógio do Windows a 1 ms + trocas do GIL a 0,5 ms | Captura, interface e gravador são 3 threads Python: com o relógio de 15,6 ms a captura caía para 8–15 fps **a gravar** (defeito já presente na 0.2) | x264 24,8 fps e Log 25,0 fps gravados, 0 descartados |
 | Log com o codificador `prores` (aw) e `cv2.LUT` de 16 bits | O `prores_ks` só fazia 13 fps; a tabela em numpy custava 30 ms | ProRes 39 fps a 1080p; LUT 7 ms; ida e volta Log→Rec709 com erro médio 0,3/255 |
 | Log sem o look | O colorista quer a imagem neutra; o look fica só no ecrã | Frame Log mais perto do cru (Δ 2,0) do que do look «Quente» (Δ 6,7) |
+| Máscara da IA copiada da memória do MediaPipe | `np.ascontiguousarray` não copia: o chroma lia memória já libertada | live_test: 2/2 crashes (0xC0000005) → 2/2 sem erro |
+| Aberturas/fechos da câmara serializados + resolução com espera de 400 ms | Trocar de resolução depressa abria a câmara em duas threads ao mesmo tempo | 25 listas percorridas sem crash; câmara reaberta a 27 fps |
+| Deslizadores de hardware começam no padrão se a câmara reporta um extremo em automático | Esta PTZ reporta 15 000 K em auto; desligar o «Auto» aplicava-o | Auto desligado → 5 600 K; «Repor câmara» → automático |
 | DNG linear empilhado em vez de «RAW» falso | A câmara entrega 8 bits: o ganho real é o ruído e a margem de edição | Revelado pelo LibRaw: diferença 2,1/255 face à imagem; ruído ÷2,7 com 8 frames |
 
 ## 6. Testes
@@ -165,11 +169,12 @@ câmara ──► CaptureThread (capture.py) ──► Pipeline (pipeline.py):
 | `tests/live_test.py` | sim (2 câmaras) | fps com chroma/IA, mesa com duas câmaras | mesa 26,8 fps; 2.ª câmara 30 fps |
 | `tests/recorder_bench.py`, `tests/vcam_test.py` | não | gravador por codec, câmara virtual | OK (Log 240/240 frames) |
 | `tests/test_formats.py` | não | ICC/EXIF/XMP com acentos, DNG revelado pelo LibRaw, empilhamento, S-Log3 sem banding, LUT .cube | **Tudo OK** |
+| `tests/ui_smoke_test.py` | sim | os 8 separadores, 4 perfis, menus, 68 caixas e 25 listas (sem exceções), hardware da câmara (e reposição), mesa, revisão, foto e gravação pela interface, configuração intacta | **Tudo OK** |
 | `tests/v03_test.py` | sim | histograma RGB, PNG/JPEG/TIFF com metadados, Lightroom, DNG e DNG+JPEG, fantasma, guias, máscara do chroma, LUTs, gravação Log neutra, perfis, revisão, configuração intacta | **Tudo OK** (26 verificações) |
 
 ## 7. Instalação e distribuição
 
-- **Noutro PC**: extrair `AlflorStudio-0.3.0-win64.zip` → `Instalar.cmd` (sem administrador; atalhos no Ambiente de Trabalho e
+- **Noutro PC**: extrair `AlflorStudio-0.3.1-win64.zip` → `Instalar.cmd` (sem administrador; atalhos no Ambiente de Trabalho e
   Menu Iniciar; desinstala-se nas Definições do Windows; definições e gravações mantidas). Inclui FFmpeg, modelos de IA e ponte PTZ.
 - **A partir do código**: `git clone` → `Alflor Studio.bat` (cria o `.venv` e instala as dependências).
 - **Gerar o instalador**: `powershell -ExecutionPolicy Bypass -File packaging\build.ps1` → `dist\`.

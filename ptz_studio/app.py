@@ -583,35 +583,58 @@ class MainWindow(QMainWindow):
         if not info:
             self.hw_form.addRow(QLabel("Sem controlos de hardware para esta câmara.", objectName="hint"))
             return
+        resets = []
         for group, labels, setter in (("amp", AMP_LABELS, "set_amp"), ("cam", CAM_EXTRA, "set_cam")):
             for name, label in labels.items():
                 r = info.get(group, {}).get(name)
                 if not r:
                     continue
+                is_auto = bool(r["caps"] & 1) and bool(r["flags"] & 1)
+                # em automático, algumas câmaras reportam um extremo (ex.: 15000 K): começar no valor padrão,
+                # senão desligar o «Auto» aplicava esse extremo e a imagem ficava azul/verde-lima
+                start = r["def"] if is_auto and r["cur"] in (r["min"], r["max"]) else r["cur"]
                 row = QHBoxLayout()
-                s = QSlider(Qt.Orientation.Horizontal, minimum=r["min"], maximum=r["max"], value=r["cur"])
-                val = QLabel(str(r["cur"]), minimumWidth=44)
-                def changed(v, n=name, st=setter, lab=val):
+                s = QSlider(Qt.Orientation.Horizontal, minimum=r["min"], maximum=r["max"], value=start)
+                val = QLabel(str(start), minimumWidth=44)
+                auto = QCheckBox("Auto") if r["caps"] & 1 else None
+
+                def changed(v, n=name, st=setter, lab=val, chk=auto):
                     lab.setText(str(v))
-                    if self.bridge:
-                        getattr(self.bridge, st)(n, v)
+                    if self.bridge:   # nunca tira a câmara do automático sem a caixa o mostrar
+                        getattr(self.bridge, st)(n, v, auto=bool(chk is not None and chk.isChecked()))
                 s.valueChanged.connect(changed)
                 row.addWidget(s, 1)
                 row.addWidget(val)
-                if r["caps"] & 1:
-                    auto = QCheckBox("Auto")
-                    auto.setChecked(bool(r["flags"] & 1))
-                    s.setEnabled(not auto.isChecked())
+                if auto is not None:
+                    auto.setChecked(is_auto)
+                    s.setEnabled(not is_auto)
+
                     def auto_changed(on, n=name, st=setter, sl=s):
                         sl.setEnabled(not on)
                         if self.bridge:
                             getattr(self.bridge, st)(n, sl.value(), auto=on)
                     auto.toggled.connect(auto_changed)
                     row.addWidget(auto)
-                reset = QToolButton(text="↺", toolTip=f"Repor ({r['def']})")
-                reset.clicked.connect(lambda _=False, sl=s, d=r["def"]: sl.setValue(d))
+
+                def reset_one(_=False, sl=s, d=r["def"], chk=auto):
+                    """Padrão de fábrica: valor por omissão e, se existir, automático."""
+                    sl.blockSignals(True)
+                    sl.setValue(d)
+                    sl.blockSignals(False)
+                    if chk is not None and not chk.isChecked():
+                        chk.setChecked(True)          # envia o automático (auto_changed)
+                    else:
+                        sl.valueChanged.emit(d)       # envia o valor (com o modo atual)
+                reset = QToolButton(text="↺", toolTip=f"Repor o padrão ({r['def']}{' · automático' if auto else ''})")
+                reset.clicked.connect(reset_one)
+                resets.append(reset_one)
                 row.addWidget(reset)
                 self.hw_form.addRow(label, row)
+        if resets:
+            b_all = QPushButton("Repor câmara (automático + padrões de fábrica)")
+            b_all.setToolTip("Útil se a imagem ficar com cor ou exposição estranhas: as definições ficam guardadas na câmara")
+            b_all.clicked.connect(lambda: ([f() for f in resets], self.statusBar().showMessage("Câmara reposta nos padrões", 4000)))
+            self.hw_form.addRow(b_all)
 
     # --- Tracking ------------------------------------------------------------------------
     def _tab_chroma(self) -> QWidget:
@@ -1096,8 +1119,11 @@ class MainWindow(QMainWindow):
         f3 = QFormLayout(g3)
         rc = s["record"]
         cmb_codec = QComboBox()
+        if rc["codec"] == "prores_log":   # o Log escolhe-se na caixa «Gravar em LOG» (uma só forma de o ligar)
+            rc["codec"], rc["log"] = "auto", True
         for key, label in CODECS.items():
-            cmb_codec.addItem(label, key)
+            if key != "prores_log":
+                cmb_codec.addItem(label, key)
         cmb_codec.setCurrentIndex(max(0, cmb_codec.findData(rc["codec"])))
         cmb_codec.currentIndexChanged.connect(lambda _i: rc.__setitem__("codec", cmb_codec.currentData()))
         f3.addRow("Codec", cmb_codec)
@@ -1261,7 +1287,9 @@ class MainWindow(QMainWindow):
         cmb_res = QComboBox()
         cmb_res.addItems(["max", "3840x2160", "1920x1080", "1280x720"])
         cmb_res.setCurrentText(self.settings["resolution"])
-        cmb_res.currentTextChanged.connect(lambda t: (self.settings.__setitem__("resolution", t), self.open_device(self.device)))
+        # espera 400 ms: a roda do rato sobre a lista não reabre a câmara a cada opção
+        self._res_timer = QTimer(self, singleShot=True, interval=400, timeout=lambda: self.open_device(self.device))
+        cmb_res.currentTextChanged.connect(lambda t: (self.settings.__setitem__("resolution", t), self._res_timer.start()))
         f.addRow("Resolução", cmb_res)
         cmb_ptzmode = QComboBox()
         for label, key in (("Automático (motores se existirem)", "auto"), ("Forçar PTZ digital (recorte)", "digital")):

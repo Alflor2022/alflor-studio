@@ -23,7 +23,7 @@ Premiere/CapCut, Stream Deck e câmara virtual (Zoom, Teams, Meet…).
 | **Movimentos de realizador** | Push-in, pull-out, panorâmica, revelação em tilt, arco, chicote (whip pan), crash zoom. |
 | **Tracking com e sem IA** | Rosto (YuNet → Haar), pessoa (IA MediaPipe Pose com cabeça para *headroom*, ou HOG + CSRT sem IA) ou qualquer objeto escolhido (CSRT). **Identidade**: não salta para outra pessoa que passe. **Recuperação**: se o alvo se perde, procura-o em todo o ecrã (forma + cor) e a câmara volta à última posição onde o viu. Composição ao centro ou nos terços, *headroom* correto, plano (grande plano → plano geral) com zoom automático, reatividade ajustável, regresso ao início se perder o sujeito. Funciona com motores reais **ou** em PTZ digital. |
 | **Calibração** | Mede automaticamente quantas unidades de pan/tilt correspondem ao ecrã e a ampliação ótica do zoom (correlação de fase + ORB), para cliques e tracking precisos. |
-| **Imagem (hardware)** | Brilho, contraste, saturação, nitidez, tonalidade, balanço de brancos (manual/auto) e, se a câmara tiver, foco, exposição, íris, ganho. Gerados automaticamente para cada câmara. |
+| **Imagem (hardware)** | Brilho, contraste, saturação, nitidez, tonalidade, balanço de brancos (manual/auto) e, se a câmara tiver, foco, exposição, íris, ganho. Gerados automaticamente para cada câmara. Botão **Repor câmara** (automático + padrões de fábrica) — estas definições ficam gravadas na própria câmara. |
 | **Gestos (IA)** | 👌 OK inicia o tracking **na pessoa que fez o gesto**, ✋ palma aberta para, ✌ vitória tira uma foto; 👍 e ✊ configuráveis. Gesto confirmado após ~0,6 s estável, com pausa de 2,5 s contra repetições. |
 | **Chroma key** | Verde/azul/cor personalizada (conta-gotas Alt+clique, calibração automática), semelhança, suavidade, supressão de spill, contração e esbatimento do contorno, garbage matte, light wrap. Modos **Chroma**, **IA sem ecrã verde** e **Híbrido** (chroma nos contornos + IA para retirar objetos). Fundo transparente (PNG com alfa, **ProRes 4444**), cor, imagem, vídeo em ciclo ou desfocado. Acelerado pela GPU Intel (OpenCL) em 2 threads: 25 imagens/s a 1080p. |
 | **Mesa de realização** | Até 8 entradas (câmara principal, outras câmaras USB/telemóvel/HDMI, imagens, vídeos, barras). PROGRAMA/PREVIEW, CUT, AUTO, T-bar, transições Mix/Dip/Wipe/Push, FTB, PiP, **cenário virtual** (chroma por cima de outra entrada), logótipo e oráculo. Multiview com tally, controlo PTZ da câmara em preview, gravação e câmara virtual do programa. |
@@ -166,7 +166,7 @@ tests/                  unitários, chroma, ao vivo, hardware, gravador, câmara
 ## Testes
 
 ```powershell
-.venv\Scripts\python.exe tests\hardware_test.py "UVC Camera"   # move a câmara! fps, calibração, fotos, vídeo, remoto, tracking
+.venv\Scripts\python.exe tests\hardware_test.py "UVC Camera"   # move a câmara! fps, calibração, fotos, vídeo, remoto, tracking (--guardar-calibracao grava a calibração)
 .venv\Scripts\python.exe tests\recorder_bench.py libx264
 .venv\Scripts\python.exe tests\vcam_test.py
 .venv\Scripts\python.exe tests\test_units.py                    # gestos, mesa, gatilhos OBS (sem câmara)
@@ -176,6 +176,7 @@ tests/                  unitários, chroma, ao vivo, hardware, gravador, câmara
 .venv\Scripts\python.exe tests\hud_test.py                      # elementos no ecrã / gravação / foto
 .venv\Scripts\python.exe tests\test_formats.py foto.png         # ICC/EXIF/XMP, DNG (LibRaw), S-Log3, LUTs (pip install -r requirements-dev.txt)
 .venv\Scripts\python.exe tests\v03_test.py                      # Log, RAW, metadados, Lightroom, máscara, guias, perfis, revisão
+.venv\Scripts\python.exe tests\ui_smoke_test.py                 # interface inteira: separadores, perfis, listas, mesa, hardware, foto, gravação
 .venv\Scripts\python.exe tests\live_test.py "UVC Camera" "Integrated Webcam"   # fps com chroma/IA e mesa
 ```
 

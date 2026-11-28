@@ -33,6 +33,11 @@ def tune_threads() -> None:
             pass
 
 
+# Abrir/fechar câmaras DirectShow em paralelo (ex.: trocar de resolução depressa, a thread antiga
+# ainda a abrir) rebentava o processo com 0xC0000005. Todas as aberturas/fechos passam por aqui.
+_DEVICE_LOCK = threading.RLock()
+
+
 RES_CANDIDATES = [(3840, 2160), (2560, 1440), (1920, 1080), (1280, 720), (640, 480)]
 
 
@@ -112,7 +117,16 @@ class CaptureThread(QThread):
         return data
 
     # --- ciclo principal ------------------------------------------------------------
+    @staticmethod
+    def _release(cap) -> None:
+        with _DEVICE_LOCK:
+            cap.release()
+
     def _open(self) -> cv2.VideoCapture | None:
+        with _DEVICE_LOCK:
+            return self._open_locked()
+
+    def _open_locked(self) -> cv2.VideoCapture | None:
         cap = cv2.VideoCapture(self.index, cv2.CAP_DSHOW)
         if not cap.isOpened():
             return None
@@ -130,15 +144,32 @@ class CaptureThread(QThread):
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         return cap
 
+    OPEN_ATTEMPTS = 5     # a câmara pode estar a ser largada por outra app (OBS, Zoom, outro processo)
+
+    def _open_with_retry(self):
+        """Abre e lê o 1.º frame, com novas tentativas: antes desistia à primeira e ficava sem imagem."""
+        for attempt in range(1, self.OPEN_ATTEMPTS + 1):
+            if not self._running:
+                return None, None
+            cap = self._open()
+            if cap is not None:
+                ok, frame = cap.read()
+                if ok and frame is not None:
+                    return cap, frame
+                self._release(cap)
+            if attempt < self.OPEN_ATTEMPTS and self._running:
+                self.status.emit(f"Câmara ocupada ou a arrancar - nova tentativa ({attempt}/{self.OPEN_ATTEMPTS - 1})…")
+                time.sleep(1.5)
+        return None, None
+
     def run(self) -> None:
-        cap = self._open()
+        cap, frame = self._open_with_retry()
         if cap is None:
-            self.failed.emit("Não foi possível abrir a câmara (pode estar a ser usada por outra aplicação).")
+            if self._running:
+                self.failed.emit("Não foi possível abrir a câmara (pode estar a ser usada por outra aplicação).")
             return
-        ok, frame = cap.read()
-        if not ok:
-            self.failed.emit("A câmara abriu mas não envia imagem (em uso por outra aplicação?).")
-            cap.release()
+        if not self._running:   # parada enquanto abria (ex.: nova resolução escolhida): sair já
+            self._release(cap)
             return
         self.size = (frame.shape[1], frame.shape[0])
         self.opened.emit(frame.shape[1], frame.shape[0], cap.get(cv2.CAP_PROP_FPS))
@@ -152,7 +183,7 @@ class CaptureThread(QThread):
                 failures += 1
                 if failures > 30:
                     self.status.emit("Sinal perdido - a tentar religar a câmara…")
-                    cap.release()
+                    self._release(cap)
                     time.sleep(1.0)
                     cap = self._open()
                     failures = 0
@@ -260,7 +291,7 @@ class CaptureThread(QThread):
                 if self.tracker.hands:   # mãos e gestos (coords de saída) para desenhar
                     meta["hands"] = [(self.pipeline.box_raw_to_out(h.box), h.gesture) for h in self.tracker.hands]
             self.frame_ready.emit(img, meta)
-        cap.release()
+        self._release(cap)
         with self._lock:
             for _, _, ev, _ in self._grab_requests:
                 ev.set()
