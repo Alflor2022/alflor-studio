@@ -2,6 +2,7 @@
 câmara virtual, telemóvel e tracking."""
 from __future__ import annotations
 
+import sys
 import threading
 import time
 
@@ -10,7 +11,27 @@ import numpy as np
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
 
-from .pipeline import Pipeline, apply_peaking, apply_zebra, luma_histogram
+from .pipeline import Pipeline, apply_peaking, apply_zebra, rgb_histogram
+
+_TUNED = False
+
+
+def tune_threads() -> None:
+    """Captura, interface e gravador são 3 threads Python que disputam o GIL. No Windows o relógio de
+    15,6 ms atrasava cada troca e, a gravar, a captura caía de 25 para 8–15 fps. Com o relógio a 1 ms e
+    trocas de 0,5 ms grava 25/25 fps (medido neste portátil, x264 e Log)."""
+    global _TUNED
+    if _TUNED:
+        return
+    _TUNED = True
+    sys.setswitchinterval(0.0005)
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.winmm.timeBeginPeriod(1)
+        except (OSError, AttributeError):
+            pass
+
 
 RES_CANDIDATES = [(3840, 2160), (2560, 1440), (1920, 1080), (1280, 720), (640, 480)]
 
@@ -30,6 +51,9 @@ class CaptureThread(QThread):
         self.pipeline = pipeline
         self.tracker = tracker
         self.emit_preview = emit_preview         # False nas câmaras extra da mesa (poupa CPU)
+        self.preview_div = 1                     # 2 = pré-visualização a meio ritmo enquanto grava (Log)
+        self._pv_i = 0
+        tune_threads()
         self.sinks: list = []                   # objetos com .write(frame) (ou .wants_alpha → BGRA)
         self._running = True
         self._lock = threading.Lock()
@@ -144,6 +168,7 @@ class CaptureThread(QThread):
             box = self.tracker.update(frame) if self.tracker else None
             self.pipeline.subject = box
             self.pipeline.subject_kind = self.tracker.mode if self.tracker else "face"
+            self.pipeline.want_neutral = any(getattr(s, "wants_neutral", False) for s in self.sinks)
             out = self.pipeline.process(frame)
             alpha = self.pipeline.alpha
             if alpha is not None and alpha.shape[:2] != out.shape[:2]:
@@ -162,6 +187,8 @@ class CaptureThread(QThread):
                         pending.append(req)
                 self._grab_requests = pending
             bgra = None
+            neutral_img = None
+            hmeta = None
             sink_img = out
             if self.sinks and self.hud is not None:
                 # elementos marcados para «gravação» (timecode, claquete, logótipo…) só na saída gravada
@@ -174,7 +201,13 @@ class CaptureThread(QThread):
                     self.status.emit(f"Erro nos elementos da gravação: {exc}")
             for sink in list(self.sinks):
                 try:
-                    if getattr(sink, "wants_alpha", False):   # ex.: ProRes 4444 com transparência
+                    if getattr(sink, "wants_neutral", False) and self.pipeline.neutral is not None:
+                        if neutral_img is None:   # Log: imagem sem ajuste/look (+ elementos da gravação)
+                            neutral_img = self.pipeline.neutral
+                            if self.hud is not None and hmeta is not None:
+                                neutral_img = self.hud.burn(neutral_img, hmeta, "rec")
+                        sink.write(neutral_img)
+                    elif getattr(sink, "wants_alpha", False):   # ex.: ProRes 4444 com transparência
                         if bgra is None:
                             a = alpha if alpha is not None else np.full(sink_img.shape[:2], 255, np.uint8)
                             bgra = cv2.merge((*cv2.split(sink_img), a))
@@ -184,7 +217,8 @@ class CaptureThread(QThread):
                 except Exception as exc:  # um destino com erro não pode parar a captura
                     self.status.emit(f"Erro em {type(sink).__name__}: {exc}")
                     self.sinks.remove(sink)
-            if not self.emit_preview:
+            self._pv_i += 1
+            if not self.emit_preview or (self.preview_div > 1 and self.sinks and self._pv_i % self.preview_div):
                 frames += 1
                 now = time.monotonic()
                 if now - t_last >= 1.0:
@@ -205,12 +239,12 @@ class CaptureThread(QThread):
                 prev = cv2.add(cv2.multiply(prev, a3, scale=1 / 255.0),
                                cv2.multiply(self._checker, cv2.bitwise_not(a3), scale=1 / 255.0))
             ov = self.settings["overlays"]
+            if ov["hist"] and frames % 5 == 0:   # antes das zebras/peaking, que alterariam as cores
+                hist = rgb_histogram(prev)
             if ov["peaking"]:
                 apply_peaking(prev)
             if ov["zebra"]:
                 apply_zebra(prev)
-            if ov["hist"] and frames % 5 == 0:
-                hist = luma_histogram(prev)
             img = QImage(prev.data, prev.shape[1], prev.shape[0], prev.strides[0], QImage.Format.Format_BGR888).copy()
             frames += 1
             now = time.monotonic()

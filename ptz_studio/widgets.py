@@ -10,8 +10,15 @@ from PySide6.QtWidgets import QWidget
 ACCENT = QColor("#ff8a3d")
 
 
+GUIDES = {"off": ("Sem guia", None), "1:1": ("1:1 quadrado", 1.0), "4:5": ("4:5 Instagram", 0.8),
+          "9:16": ("9:16 Reels/TikTok/Stories", 9 / 16), "3:2": ("3:2 fotografia", 1.5),
+          "2.39:1": ("2.39:1 cinema", 2.39), "passport": ("Foto tipo passe 35×45", 35 / 45)}
+
+
 class PreviewWidget(QWidget):
     """Monitor: clique = centrar, arrastar = mover, roda = zoom, botão direito = escolher sujeito."""
+
+    ghost: QImage | None = None       # última foto (fantasma para alinhar a seguinte)
 
     clicked = Signal(float, float)          # coordenadas normalizadas da imagem mostrada
     drag_velocity = Signal(float, float)
@@ -58,6 +65,68 @@ class PreviewWidget(QWidget):
         w, h = iw * s, ih * s
         return QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h)
 
+    def _draw_histogram(self, p: QPainter, r: QRectF, hist) -> None:
+        """Histograma RGB (como no Lightroom) com aviso de altas luzes/sombras cortadas."""
+        hw, hh = 200, 76
+        hx, hy = r.right() - hw - 12, r.bottom() - hh - 12
+        p.fillRect(QRectF(hx, hy, hw, hh), QColor(0, 0, 0, 150))
+        chans = hist["rgb"] if isinstance(hist, dict) else [hist]
+        cols = (QColor(60, 120, 255, 170), QColor(60, 220, 100, 170), QColor(255, 70, 70, 170)) if len(chans) == 3 \
+            else (QColor(255, 255, 255, 120),)
+        old = p.compositionMode()
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)   # sobreposição R+G+B = branco
+        for ch, col in zip(chans, cols):
+            path = QPainterPath(QPointF(hx, hy + hh))
+            n = len(ch)
+            for i, v in enumerate(ch):
+                path.lineTo(QPointF(hx + hw * i / (n - 1), hy + hh - float(v) * (hh - 4)))
+            path.lineTo(QPointF(hx + hw, hy + hh))
+            p.fillPath(path, col)
+        p.setCompositionMode(old)
+        if not isinstance(hist, dict):
+            return
+        warn = []
+        if hist["clip_hi"] > 0.005:
+            warn.append(f"altas {hist['clip_hi'] * 100:.1f}%")
+            p.fillRect(QRectF(hx + hw - 4, hy, 4, hh), QColor(255, 60, 60))
+        if hist["clip_lo"] > 0.02:
+            warn.append(f"sombras {hist['clip_lo'] * 100:.1f}%")
+            p.fillRect(QRectF(hx, hy, 4, hh), QColor(80, 140, 255))
+        if warn:
+            p.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
+            p.setPen(QColor("#ff6b6b"))
+            p.drawText(QRectF(hx, hy - 18, hw, 16), Qt.AlignmentFlag.AlignRight, "⚠ cortado: " + " · ".join(warn))
+
+    def _draw_guide(self, p: QPainter, r: QRectF, key: str) -> None:
+        """Guia de corte para o formato final (Instagram, Reels, passe…): escurece o que fica de fora."""
+        label, aspect = GUIDES.get(key, ("", None))
+        if not aspect:
+            return
+        if aspect < r.width() / r.height():
+            gh = r.height() * (0.92 if key == "passport" else 1.0)
+            gw = gh * aspect
+        else:
+            gw = r.width()
+            gh = gw / aspect
+        g = QRectF(r.center().x() - gw / 2, r.center().y() - gh / 2, gw, gh)
+        shade = QPainterPath()
+        shade.addRect(r)
+        inner = QPainterPath()
+        inner.addRect(g)
+        p.fillPath(shade.subtracted(inner), QColor(0, 0, 0, 120))
+        p.setPen(QPen(QColor(255, 200, 0, 200), 1.5, Qt.PenStyle.DashLine))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(g)
+        if key == "passport":   # cabeça 70–80% da altura, olhos a ~45% do topo (normas de passe)
+            p.setPen(QPen(QColor(255, 255, 255, 170), 1.5))
+            p.drawEllipse(QRectF(g.center().x() - g.width() * 0.29, g.y() + g.height() * 0.10, g.width() * 0.58, g.height() * 0.72))
+            p.setPen(QPen(QColor(255, 255, 255, 110), 1, Qt.PenStyle.DotLine))
+            for fy in (0.40, 0.50):
+                p.drawLine(QPointF(g.left(), g.y() + g.height() * fy), QPointF(g.right(), g.y() + g.height() * fy))
+        p.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
+        p.setPen(QColor(255, 200, 0, 220))
+        p.drawText(QPointF(g.x() + 6, g.y() + 16), label)
+
     def _norm(self, p: QPointF) -> tuple[float, float]:
         r = self.image_rect()
         return (min(1, max(0, (p.x() - r.x()) / r.width())), min(1, max(0, (p.y() - r.y()) / r.height())))
@@ -74,6 +143,12 @@ class PreviewWidget(QWidget):
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.message)
             return
         p.drawImage(r, self.image)
+        comp = self.settings.get("compose", {})
+        if self.ghost is not None and comp.get("ghost"):
+            p.setOpacity(float(comp.get("ghost_opacity", 0.35)))
+            p.drawImage(r, self.ghost)
+            p.setOpacity(1.0)
+        self._draw_guide(p, r, comp.get("guide", "off"))
         ov = self.settings["overlays"]
         from . import hud
         scr = lambda key: hud.on(self.settings, key, "screen")
@@ -130,15 +205,7 @@ class PreviewWidget(QWidget):
         # histograma
         hist = self.meta.get("hist")
         if ov["hist"] and hist is not None:
-            hw, hh = 180, 70
-            hx, hy = r.right() - hw - 12, r.bottom() - hh - 12
-            p.fillRect(QRectF(hx, hy, hw, hh), QColor(0, 0, 0, 140))
-            path = QPainterPath(QPointF(hx, hy + hh))
-            n = len(hist)
-            for i, v in enumerate(hist):
-                path.lineTo(QPointF(hx + hw * i / (n - 1), hy + hh - float(v) * (hh - 4)))
-            path.lineTo(QPointF(hx + hw, hy + hh))
-            p.fillPath(path, QColor(255, 255, 255, 120))
+            self._draw_histogram(p, r, hist)
         # textos
         p.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
         p.setPen(QColor(255, 255, 255, 220))

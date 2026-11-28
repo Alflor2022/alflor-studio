@@ -4,3 +4,5 @@ numpy>=1.26
 pyvirtualcam>=0.11
 obsws-python>=1.7
 qrcode>=7.4
+Pillow>=10.3          # JPEG/PNG com perfil sRGB, EXIF e XMP
+tifffile>=2024.1      # TIFF 16 bits e DNG (RAW linear)

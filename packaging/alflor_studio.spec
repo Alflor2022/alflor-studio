@@ -17,7 +17,10 @@ datas = [
     (MODELS, "models"),
 ]
 binaries = [(BRIDGE, "bin"), (FFMPEG, "bin")]
-hidden = ["obsws_python", "pyvirtualcam", "qrcode", "websocket"]
+hidden = ["obsws_python", "pyvirtualcam", "qrcode", "websocket",
+          # fotos profissionais (0.3): TIFF/DNG, perfil ICC, metadados e revisão
+          "tifffile", "PIL.ImageCms", "PIL.PngImagePlugin", "PIL.JpegImagePlugin", "PIL.TiffImagePlugin",
+          "ptz_studio.photo_formats", "ptz_studio.review"]
 for pkg in ("mediapipe", "pyvirtualcam"):
     d, b, h = collect_all(pkg)
     datas += d

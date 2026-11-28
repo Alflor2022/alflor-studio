@@ -35,6 +35,7 @@ from . import hud as hudmod
 from .hud import HudBurner
 from .integrations import Gamepad, OBSLink, apply_update, check_update, restart_app, scene_commands
 from .media import CODECS, Recorder, VirtualCam, best_sharpness, find_ffmpeg, output_path, save_image, stack_frames
+from . import photo_formats as pf
 from .pipeline import LOOKS, Pipeline
 from .ptz import EASINGS, DigitalBackend, Keyframe, PhysicalBackend, PTZController
 from .remote import RemoteServer
@@ -57,6 +58,7 @@ Shift+Espaço ...... foto c/ temporizador   Shift+R ...... gravar c/ temporizado
 G grelha · Z zebras · P peaking · N noite · B desfoque · M espelho
 F11 / duplo clique . ecrã inteiro     Ctrl+P ...... reproduzir travelling
 K ................. chroma on/off      Ctrl+M ...... mesa de realização
+Ctrl+Shift+V ...... revisão de fotos (estrelas 1–5, P escolher, X rejeitar, C comparar)
 Alt + clique ...... conta-gotas do chroma (cor do ecrã verde)
 Gestos (IA): 👌 OK = seguir quem fez · ✋ palma = parar · ✌ = foto
 Mesa: 1–8 preview · Ctrl+1–8 programa · Espaço CUT · Enter AUTO · F FTB
@@ -176,6 +178,11 @@ class MainWindow(QMainWindow):
         top.addWidget(btn_refresh)
         top.addWidget(self.lbl_mode)
         top.addStretch(1)
+        self.cmb_profile = QComboBox(toolTip="Perfil da interface: mostra só o que cada trabalho precisa")
+        for k, (lbl, _t, _h) in self.UI_PROFILES.items():
+            self.cmb_profile.addItem(lbl, k)
+        top.addWidget(QLabel("Perfil:"))
+        top.addWidget(self.cmb_profile)
         self.btn_photo = QPushButton("📷  Foto", objectName="big",
                                      toolTip="Foto agora (Espaço) · com temporizador: Shift+Espaço ou a seta ▾")
         self.btn_photo.clicked.connect(self._photo_clicked)
@@ -210,6 +217,8 @@ class MainWindow(QMainWindow):
         btn_mesa.clicked.connect(self.open_switcher)
         for b in (self.btn_photo, self.btn_photo_menu, self.btn_rec, self.btn_rec_menu, self.btn_track, self.btn_gest, self.btn_chroma, btn_home, btn_mesa):
             top.addWidget(b)
+        self._top_groups = {"photo_menu": [self.btn_photo_menu], "rec": [self.btn_rec, self.btn_rec_menu],
+                            "track": [self.btn_track], "gest": [self.btn_gest], "mesa": [btn_mesa]}
         root.addLayout(top)
 
         split = QSplitter(Qt.Orientation.Horizontal)
@@ -237,11 +246,33 @@ class MainWindow(QMainWindow):
             scroll.setWidget(builder())
             self.tabs.addTab(scroll, title)
         split.addWidget(self.tabs)
+        self.cmb_profile.setCurrentIndex(max(0, self.cmb_profile.findData(self.settings.get("ui_profile", "completo"))))
+        self.apply_ui_profile(self.cmb_profile.currentData())
+        self.cmb_profile.currentIndexChanged.connect(lambda _i: self.apply_ui_profile(self.cmb_profile.currentData()))
         split.setStretchFactor(0, 1)
         root.addWidget(split, 1)
         self.setCentralWidget(central)
         self.lbl_stats = QLabel("")
         self.statusBar().addPermanentWidget(self.lbl_stats)
+
+    # perfil → (nome, separadores visíveis (None = todos), botões da barra escondidos)
+    UI_PROFILES = {
+        "completo": ("Completo", None, ()),
+        "fotografo": ("Fotógrafo", {"PTZ", "Imagem", "Chroma", "Captura", "Sistema"}, ("rec", "track", "gest", "mesa")),
+        "video": ("Vídeo", {"PTZ", "Imagem", "Chroma", "Tracking", "Captura", "Travelling", "Sistema"}, ("photo_menu",)),
+        "live": ("Live / streaming", {"PTZ", "Imagem", "Chroma", "Tracking", "Captura", "Ligações", "Sistema"}, ("photo_menu",)),
+    }
+
+    def apply_ui_profile(self, key: str) -> None:
+        _lbl, tabs, hidden = self.UI_PROFILES.get(key, self.UI_PROFILES["completo"])
+        for i in range(self.tabs.count()):
+            self.tabs.setTabVisible(i, tabs is None or self.tabs.tabText(i) in tabs)
+        if not self.tabs.isTabVisible(self.tabs.currentIndex()):
+            self.tabs.setCurrentIndex(next(i for i in range(self.tabs.count()) if self.tabs.isTabVisible(i)))
+        for name, widgets in self._top_groups.items():
+            for wdg in widgets:
+                wdg.setVisible(name not in hidden)
+        self.settings["ui_profile"] = key if key in self.UI_PROFILES else "completo"
 
     def _slider(self, lo: int, hi: int, value: int, on_change, scale: float = 1.0) -> QSlider:
         s = QSlider(Qt.Orientation.Horizontal, minimum=lo, maximum=hi, value=value)
@@ -455,6 +486,10 @@ class MainWindow(QMainWindow):
         row.addWidget(b_cur)
         row.addWidget(b_now)
         f.addRow(row)
+        b_cube = QPushButton("Exportar look (.cube)…")
+        b_cube.setToolTip("Ajuste inteligente + look de cor como LUT 3D para Premiere, DaVinci, Photoshop, OBS ou Final Cut")
+        b_cube.clicked.connect(self.export_look_cube)
+        f.addRow(b_cube)
         self.lbl_grade_ref = QLabel(alignment=Qt.AlignmentFlag.AlignLeft)
         f.addRow("Referência", self.lbl_grade_ref)
         self.lbl_grade = QLabel("", objectName="hint", wordWrap=True)
@@ -463,6 +498,39 @@ class MainWindow(QMainWindow):
             self.pipeline.grader.load_reference(gr["ref_path"])
         self._show_grade_reference()
         return g
+
+    def apply_look_u8(self, bgr: np.ndarray) -> np.ndarray:
+        """Aplica a uma imagem o mesmo ajuste + look de cor do pipeline (sem ruído/nitidez/chroma)."""
+        p = self.settings["pipeline"]
+        out = bgr
+        if p.get("grade", {}).get("mode", "off") != "off":
+            out = self.pipeline.grader.apply(out)
+        matrix, lut = LOOKS.get(p["look"], (None, None))
+        if matrix is not None:
+            out = cv2.transform(out, matrix)
+        if lut is not None:
+            out = cv2.LUT(out, lut)
+        return out
+
+    def export_look_cube(self) -> None:
+        from .media import _safe
+        name = f"Alflor_look_{_safe(self.settings['pipeline']['look'])}.cube"
+        path, _ = QFileDialog.getSaveFileName(self, "Exportar look como LUT 3D", str(Path(self.settings["output_dir"]) / name),
+                                              "LUT 3D (*.cube)")
+        if not path:
+            return
+        try:
+            pf.look_cube(Path(path), self.apply_look_u8, 33, f"Alflor Studio - {self.settings['pipeline']['look']}")
+            self.statusBar().showMessage(f"LUT do look exportada: {path}", 6000)
+        except Exception as exc:
+            QMessageBox.warning(self, APP_NAME, f"Não foi possível exportar a LUT: {exc}")
+
+    def export_log_lut(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "LUT S-Log3 → Rec.709", str(Path(self.settings["output_dir"]) / "Alflor_SLog3_para_Rec709.cube"),
+                                              "LUT 3D (*.cube)")
+        if path:
+            pf.log_to_rec709_cube(Path(path))
+            self.statusBar().showMessage(f"LUT Log→Rec709 guardada: {path} (aplicar no Premiere/DaVinci aos clips Log)", 8000)
 
     def set_grade_mode(self, mode: str) -> None:
         gr = self.settings["pipeline"]["grade"]
@@ -932,15 +1000,45 @@ class MainWindow(QMainWindow):
         f2 = QFormLayout(g2)
         ph = s["photo"]
         cmb_fmt = QComboBox()
-        for label, key in (("PNG (sem perdas)", "png"), ("JPEG qualidade máxima", "jpg"), ("TIFF (edição)", "tiff")):
+        for label, key in (("PNG (sem perdas)", "png"), ("JPEG qualidade máxima", "jpg"), ("TIFF (edição)", "tiff"),
+                           ("DNG RAW · 16 bits lineares (empilhado)", "dng"), ("DNG RAW + JPEG", "dng+jpg")):
             cmb_fmt.addItem(label, key)
         cmb_fmt.setCurrentIndex(max(0, cmb_fmt.findData(ph["format"])))
         cmb_fmt.currentIndexChanged.connect(lambda _i: ph.__setitem__("format", cmb_fmt.currentData()))
         f2.addRow("Formato", cmb_fmt)
+        sraw = QSpinBox(minimum=1, maximum=32, value=int(ph.get("raw_frames", 8)), suffix=" frames",
+                        toolTip="O DNG junta N frames em luz linear: o ruído cai √N (8 frames ≈ ÷2,8)")
+        sraw.valueChanged.connect(lambda v: ph.__setitem__("raw_frames", v))
+        f2.addRow("RAW: juntar", sraw)
+        f2.addRow(QLabel("DNG: imagem linear de 16 bits sem look (abre no Lightroom/Camera Raw como RAW, com "
+                         "exposição e balanço de brancos editáveis). Esta câmara USB entrega 8 bits por cor, por isso "
+                         "não é um RAW de sensor: os frames empilhados reduzem o ruído e dão margem nas sombras. "
+                         "Com uma Canon (EDSDK), no futuro, será o RAW verdadeiro.", objectName="hint", wordWrap=True))
         chk_look = QCheckBox("Aplicar ajustes e look à foto")
         chk_look.setChecked(ph["apply_look"])
         chk_look.toggled.connect(lambda v: ph.__setitem__("apply_look", v))
         f2.addRow(chk_look)
+        chk_mask = QCheckBox("Com chroma: guardar também a máscara e o original (para o designer)")
+        chk_mask.setChecked(bool(ph.get("export_mask")))
+        chk_mask.toggled.connect(lambda v: ph.__setitem__("export_mask", v))
+        f2.addRow(chk_mask)
+        comp = s["compose"]
+        cmb_guide = QComboBox(toolTip="Mostra no ecrã o corte do formato final (não aparece na foto nem na gravação)")
+        from .widgets import GUIDES
+        for k, (lbl, _a) in GUIDES.items():
+            cmb_guide.addItem(lbl, k)
+        cmb_guide.setCurrentIndex(max(0, cmb_guide.findData(comp.get("guide", "off"))))
+        cmb_guide.currentIndexChanged.connect(lambda _i: (comp.__setitem__("guide", cmb_guide.currentData()), self.preview.update()))
+        f2.addRow("Guia de corte", cmb_guide)
+        grow = QHBoxLayout()
+        chk_ghost = QCheckBox("Fantasma da última foto")
+        chk_ghost.setToolTip("Sobrepõe a última foto em transparência para alinhar a seguinte (produto, antes/depois, série)")
+        chk_ghost.setChecked(bool(comp.get("ghost")))
+        chk_ghost.toggled.connect(lambda v: (comp.__setitem__("ghost", v), self.preview.update()))
+        grow.addWidget(chk_ghost)
+        grow.addWidget(self._slider(10, 80, int(float(comp.get("ghost_opacity", 0.35)) * 100),
+                                    lambda v: (comp.__setitem__("ghost_opacity", v), self.preview.update()), 100.0), 1)
+        f2.addRow(grow)
         grid = QGridLayout()
         for i, (label, mode) in enumerate((("Foto", "single"), ("Temporizador 3 s", "timer3"), ("Temporizador 10 s", "timer10"),
                                            ("Burst: melhor de N", "burst"), ("Noite: empilhar N", "stack"))):
@@ -956,7 +1054,43 @@ class MainWindow(QMainWindow):
         nrow.addWidget(sb)
         nrow.addWidget(ss)
         f2.addRow("N", nrow)
+        b_review = QPushButton("🗂  Revisão: estrelas, escolher, comparar…")
+        b_review.setToolTip("Triagem das fotos de hoje (1–5 estrelas, P escolher, X rejeitar, C comparar) — Ctrl+Shift+V")
+        b_review.clicked.connect(self.open_review)
+        f2.addRow(b_review)
         lay.addWidget(g2)
+
+        gm = QGroupBox("Metadados e Lightroom")
+        fm = QFormLayout(gm)
+        md = s["meta"]
+        for key, label, tip in (("author", "Autor", "Nome do fotógrafo/estúdio (EXIF Artist + XMP dc:creator)"),
+                                ("copyright", "Direitos", "Ex.: © 2026 Alflor Digital — todos os direitos reservados"),
+                                ("client", "Cliente", "Também vai como palavra-chave, para filtrar no Lightroom"),
+                                ("keywords", "Palavras-chave", "Separadas por vírgulas (o projeto e a cena são acrescentados)"),
+                                ("description", "Descrição", "")):
+            e = QLineEdit(str(md.get(key, "")), toolTip=tip)
+            e.textChanged.connect(lambda txt, k=key: md.__setitem__(k, txt))
+            fm.addRow(label, e)
+        sr = QSpinBox(minimum=0, maximum=5, value=int(md.get("rating", 0)), specialValueText="sem estrelas", suffix=" ★")
+        sr.valueChanged.connect(lambda v: md.__setitem__("rating", v))
+        fm.addRow("Classificação inicial", sr)
+        lr_row = QHBoxLayout()
+        self.ed_lr = QLineEdit(ph.get("lightroom_dir", ""), readOnly=True, placeholderText="(não copiar)")
+        b_lr = QToolButton(text="…", toolTip="Pasta vigiada pela Importação automática do Lightroom Classic")
+        b_lr.clicked.connect(self.choose_lightroom_dir)
+        b_lr_clear = QToolButton(text="✕", toolTip="Deixar de copiar")
+        b_lr_clear.clicked.connect(lambda: (ph.__setitem__("lightroom_dir", ""), self.ed_lr.setText("")))
+        lr_row.addWidget(self.ed_lr, 1)
+        lr_row.addWidget(b_lr)
+        lr_row.addWidget(b_lr_clear)
+        fm.addRow("Copiar para", lr_row)
+        b_open_lr = QPushButton("Abrir Lightroom")
+        b_open_lr.clicked.connect(self.open_lightroom)
+        fm.addRow(b_open_lr)
+        fm.addRow(QLabel("Cada foto leva perfil sRGB, EXIF e XMP (autor, direitos, palavras-chave, estrelas). No Lightroom "
+                         "Classic: Ficheiro › Importação automática › Definições, com a pasta acima como «pasta vigiada».",
+                         objectName="hint", wordWrap=True))
+        lay.addWidget(gm)
 
         g3 = QGroupBox("Vídeo")
         f3 = QFormLayout(g3)
@@ -967,6 +1101,25 @@ class MainWindow(QMainWindow):
         cmb_codec.setCurrentIndex(max(0, cmb_codec.findData(rc["codec"])))
         cmb_codec.currentIndexChanged.connect(lambda _i: rc.__setitem__("codec", cmb_codec.currentData()))
         f3.addRow("Codec", cmb_codec)
+        chk_log = QCheckBox("Gravar em LOG (S-Log3 · ProRes 422 HQ 10 bits · .mov)")
+        chk_log.setToolTip("Imagem plana com mais latitude para color grading no DaVinci/Premiere. Ignora o codec acima.")
+        chk_log.setChecked(bool(rc.get("log")))
+        chk_log.toggled.connect(lambda v: rc.__setitem__("log", v))
+        f3.addRow(chk_log)
+        lrow = QHBoxLayout()
+        chk_neutral = QCheckBox("Log sem o look (imagem neutra)")
+        chk_neutral.setToolTip("Recomendado: o ajuste inteligente e o look de cor ficam só no ecrã; o ficheiro Log sai neutro")
+        chk_neutral.setChecked(bool(rc.get("log_neutral", True)))
+        chk_neutral.toggled.connect(lambda v: rc.__setitem__("log_neutral", v))
+        b_lut = QPushButton("Exportar LUT Log→Rec709…")
+        b_lut.clicked.connect(self.export_log_lut)
+        lrow.addWidget(chk_neutral)
+        lrow.addWidget(b_lut)
+        f3.addRow(lrow)
+        f3.addRow(QLabel("Log ≈ 750 MB/min a 1080p30 (o ProRes é pesado mas edita sem esforço). A câmara entrega 8 bits: "
+                         "o Log a 10 bits preserva todos os níveis sem banding, mas não cria gama dinâmica que o sensor não tem. "
+                         "Enquanto grava em Log, o ecrã atualiza a meio ritmo para o ficheiro não perder frames.",
+                         objectName="hint", wordWrap=True))
         sq = QSpinBox(minimum=12, maximum=35, value=rc["quality"], toolTip="Menor = mais qualidade (18–22 recomendado)")
         sq.valueChanged.connect(lambda v: rc.__setitem__("quality", v))
         f3.addRow("Qualidade (CRF/QP)", sq)
@@ -1752,8 +1905,54 @@ class MainWindow(QMainWindow):
         cap = self.capture
         fmt = ph["format"]
         snapshot = {k: self.settings[k] for k in ("output_dir", "project", "scene", "take")}
-
+        meta = self._photo_meta()
+        lr_dir = ph.get("lightroom_dir", "")
+        pl = self.settings["pipeline"]
+        mirror, flip = bool(pl["mirror"]), bool(pl["flip"])
+        chroma_on = bool(pl["chroma"].get("enabled"))
+        want_mask = bool(ph.get("export_mask")) and chroma_on
         transparent = processed and self.pipeline.chroma.transparent
+        ghost_on = bool(self.settings["compose"].get("ghost"))
+
+        def orient(f):   # os frames «crus» vêm antes do pipeline: aplicar só espelho/inversão
+            if mirror and flip:
+                return cv2.flip(f, -1)
+            if mirror:
+                return cv2.flip(f, 1)
+            return cv2.flip(f, 0) if flip else f
+
+        def finish(saved: list, ghost_src) -> None:
+            if lr_dir:   # cópia para a pasta vigiada pela Importação automática do Lightroom
+                try:
+                    Path(lr_dir).mkdir(parents=True, exist_ok=True)
+                    import shutil
+                    for pth in saved:
+                        shutil.copy2(pth, Path(lr_dir) / Path(pth).name)
+                except OSError as exc:
+                    self.notify.emit(f"Foto guardada, mas a cópia para o Lightroom falhou: {exc}")
+            if ghost_on and ghost_src is not None:
+                self._ghost_pending = cv2.resize(ghost_src, (960, int(ghost_src.shape[0] * 960 / ghost_src.shape[1])))
+            self.photo_saved.emit(str(saved[0]))
+
+        if fmt in ("dng", "dng+jpg"):
+            def work_raw():
+                try:
+                    n = int(ph.get("raw_frames", 8))
+                    if n > 1:
+                        self.notify.emit(f"RAW: a juntar {n} frames em luz linear - mantenha a câmara parada…")
+                    frames = [orient(f) for f in cap.grab(n, False)]
+                    base = output_path(snapshot, "photo", "dng")
+                    saved = [pf.save_dng(pf.linear_stack(frames), base, meta)]
+                    look = cap.latest(True)
+                    if fmt == "dng+jpg" and look is not None:   # o JPEG com o look, mesmo nome (par RAW+JPEG)
+                        if hudmod.any_on(self.settings, "photo"):
+                            look = self.hud.burn(look, dict(self._last_meta), "photo")
+                        saved.append(pf.save_photo(look, base.with_suffix(".jpg"), "jpg", None, meta))
+                    finish(saved, look)
+                except Exception as exc:
+                    self.notify.emit(f"Falha na foto RAW: {exc}")
+            threading.Thread(target=work_raw, daemon=True).start()
+            return
 
         def work():
             try:
@@ -1773,14 +1972,71 @@ class MainWindow(QMainWindow):
                     alpha = cap.latest_alpha()
                 if hudmod.any_on(self.settings, "photo"):   # ex.: logótipo, data/hora, claquete
                     img = self.hud.burn(img, dict(self._last_meta), "photo")
-                path = save_image(img, output_path(snapshot, "photo", fmt), fmt, alpha if transparent else None)
-                self.photo_saved.emit(str(path))
+                path = pf.save_photo(img, output_path(snapshot, "photo", fmt), fmt, alpha if transparent else None, meta)
+                saved = [path]
+                if want_mask:   # máscara (branco = sujeito) + original sem chroma, para recortes finos
+                    m = alpha if alpha is not None else cap.latest_alpha()
+                    raw = cap.latest(False)
+                    if m is not None:
+                        mpath = path.with_name(path.stem + "_mascara.png")
+                        ok, buf = cv2.imencode(".png", m)
+                        if ok:
+                            buf.tofile(str(mpath))
+                            saved.append(mpath)
+                    if raw is not None:
+                        saved.append(pf.save_photo(orient(raw), path.with_name(path.stem + "_original" + path.suffix), fmt, None, meta))
+                finish(saved, img)
             except Exception as exc:
                 self.notify.emit(f"Falha na foto: {exc}")
         threading.Thread(target=work, daemon=True).start()
 
+    def _photo_meta(self) -> dict:
+        m = dict(self.settings["meta"])
+        m["make"] = "Alflor Studio"
+        m["model"] = self.device or "Camera"
+        extra = [self.settings["project"], self.settings["scene"]]
+        m["keywords"] = ", ".join(k for k in [str(m.get("keywords", "")).strip(", ")] + extra if k)
+        return m
+
+    def open_review(self) -> None:
+        from .review import ReviewWindow
+        import datetime as _dt
+        folder = Path(self.settings["output_dir"]) / _dt.date.today().strftime("%Y-%m-%d") / "Fotos"
+        if not folder.exists():
+            folder = Path(self.settings["output_dir"])
+        self._review_win = ReviewWindow(folder, self)
+        self._review_win.show()
+
+    def choose_lightroom_dir(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "Pasta vigiada pelo Lightroom (Importação automática)",
+                                             self.settings["photo"].get("lightroom_dir") or str(Path.home() / "Pictures"))
+        if d:
+            self.settings["photo"]["lightroom_dir"] = d
+            self.ed_lr.setText(d)
+            self.settings.save()
+
+    def open_lightroom(self) -> None:
+        import subprocess
+        pfiles = [os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("ProgramW6432", r"C:\Program Files")]
+        names = (r"Adobe\Adobe Lightroom Classic\Lightroom.exe", r"Adobe\Adobe Lightroom CC\lightroom.exe",
+                 r"Adobe\Adobe Lightroom\lightroom.exe")
+        for base in pfiles:
+            for n in names:
+                exe = Path(base) / n
+                if exe.exists():
+                    subprocess.Popen([str(exe)])
+                    return
+        QMessageBox.information(self, APP_NAME, "Não encontrei o Lightroom instalado neste PC.\n\nAs fotos têm EXIF/XMP e "
+                                "perfil sRGB: pode importá-las em qualquer editor (Lightroom, Capture One, darktable…).")
+
     def _on_photo_saved(self, path: str) -> None:
         self.preview.countdown = 0
+        g = getattr(self, "_ghost_pending", None)
+        if g is not None:   # fantasma da última foto (só no ecrã)
+            g = np.ascontiguousarray(g)
+            self.preview.ghost = QImage(g.data, g.shape[1], g.shape[0], g.strides[0], QImage.Format.Format_BGR888).copy()
+            self._ghost_pending = None
+            self.preview.update()
         QApplication.beep()
         self.statusBar().showMessage(f"📷 {path}", 6000)
 
@@ -1895,10 +2151,13 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Gravação indisponível (sem imagem ou sem FFmpeg)")
                 return
             rc = self.settings["record"]
-            path = output_path(self.settings, "video", rc["container"])
+            log = bool(rc.get("log"))
+            path = output_path(self.settings, "video", "mov" if log else rc["container"])
             try:
                 self.recorder = Recorder(self.ffmpeg, path, self.capture.size, float(self.settings["fps"]),
-                                         rc["codec"], rc["quality"], rc["audio"])
+                                         "prores_log" if log else rc["codec"], rc["quality"], rc["audio"])
+                self.recorder.wants_neutral = log and bool(rc.get("log_neutral", True))
+                self.capture.preview_div = 2 if log else 1   # Log é pesado: o ecrã a meio ritmo garante 25/25 fps
             except Exception as exc:
                 self.btn_rec.setChecked(False)
                 self.statusBar().showMessage(f"Erro a iniciar gravação: {exc}")
@@ -1919,6 +2178,8 @@ class MainWindow(QMainWindow):
             self._auto_stop.stop()
             if self.capture and rec in self.capture.sinks:
                 self.capture.sinks.remove(rec)
+            if self.capture:
+                self.capture.preview_div = 1
             self.preview.recording = False
             self.btn_rec.setChecked(False)
             self.btn_rec.setText("●  Gravar")
@@ -2185,6 +2446,9 @@ class MainWindow(QMainWindow):
         }
         if key == Qt.Key.Key_M and ctrl:
             self.open_switcher()
+            return True
+        if key == Qt.Key.Key_V and ctrl and mods & Qt.KeyboardModifier.ShiftModifier:
+            self.open_review()                  # Ctrl+Shift+V: revisão/triagem das fotos de hoje
             return True
         if key == Qt.Key.Key_Space and mods & Qt.KeyboardModifier.ShiftModifier:
             self.photo_with_timer()             # Shift+Espaço: foto com o último temporizador

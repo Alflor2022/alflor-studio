@@ -227,6 +227,8 @@ class Pipeline:
         if amt > 0:
             blur = cv2.GaussianBlur(frame, (0, 0), 1.3)
             frame = cv2.addWeighted(frame, 1 + amt, blur, -amt, 0)
+        # gravação Log: guarda a imagem ANTES do ajuste e do look (neutra, para color grading)
+        self.neutral = frame if getattr(self, "want_neutral", False) else None
         if grading:
             frame = self.grader.apply(frame)
         matrix, lut = LOOKS.get(s["look"], (None, None))
@@ -323,6 +325,16 @@ def luma_histogram(img: np.ndarray, bins: int = 64) -> np.ndarray:
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     hist = cv2.calcHist([gray], [0], None, [bins], [0, 256]).ravel()
     return hist / max(1.0, hist.max())
+
+
+def rgb_histogram(img: np.ndarray, bins: int = 64) -> dict:
+    """Histograma por canal (B, G, R) + fração de píxeis cortados nas altas luzes e nas sombras."""
+    if img.shape[1] > 480:
+        img = cv2.resize(img, (480, max(1, int(img.shape[0] * 480 / img.shape[1]))), interpolation=cv2.INTER_NEAREST)
+    hs = np.stack([cv2.calcHist([img], [c], None, [bins], [0, 256]).ravel() for c in range(3)])
+    hs = np.minimum(hs / max(1.0, float(hs[:, 1:-1].max())), 1.0)   # os extremos não achatam o resto
+    return {"rgb": hs, "clip_hi": float((img.max(axis=2) >= 254).mean()),
+            "clip_lo": float((img.min(axis=2) <= 1).mean())}
 
 
 def sharpness_score(img: np.ndarray) -> float:

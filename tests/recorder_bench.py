@@ -30,5 +30,5 @@ while time.monotonic() - t0 < secs:
     time.sleep(max(0.0, t0 + n / 30 - time.monotonic()))
 err = rec.stop()
 print(f"{codec} -> {rec.codec}: enviados {n}, escritos {rec.frames}, descartados {rec.dropped}, "
-      f"{out.stat().st_size // 1024} KB {err}")
+      f"{rec.path.stat().st_size // 1024} KB {rec.path.name} {err}")
 out.unlink(missing_ok=True)

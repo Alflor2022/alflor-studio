@@ -30,8 +30,10 @@ Premiere/CapCut, Stream Deck e câmara virtual (Zoom, Teams, Meet…).
 | **Ajuste inteligente** | **Automático**: corrige sozinho exposição, balanço de brancos (white patch em zonas neutras), contraste e ruído conforme a luz do dia, de forma contínua e sem cintilação. **Igualar a uma referência**: dê uma foto editada (ex.: Lightroom) ou congele o frame atual — a app iguala cor (transferência Monge-Kantorovich) e tons (curva de luminância), como o *Color Match* do Premiere. Proteção de brilhos automática. |
 | **Elementos no ecrã / gravação / foto** | Cada elemento (grelha, áreas seguras, histograma, zebras, peaking, caixa do tracking, mãos, informação da câmara, ícones de estado, REC, contagem, **timecode**, **data/hora**, **claquete**, **logótipo**) escolhe-se à parte para o ecrã, para a gravação (inclui câmara virtual/OBS) e para a foto. |
 | **Imagem (software)** | Redução de ruído temporal (3 níveis), modo noite (levanta sombras), nitidez extra, looks (Vivo, Quente, Frio, Cinema, Suave, P&B, Alto contraste), desfoque de fundo que segue o sujeito, espelho/inversão. |
-| **Monitorização** | Grelha de terços, áreas seguras, zebras (sobre-exposição), *focus peaking*, histograma. |
-| **Fotografia** | PNG sem perdas, JPEG 100 ou TIFF; **temporizador 3/5/10/15/30 s ou personalizado** (seta ▾ do botão Foto ou Shift+Espaço; clicar durante a contagem cancela); **burst** (escolhe automaticamente o frame mais nítido); **empilhamento noturno** (média de N frames → muito menos ruído). |
+| **Monitorização** | Grelha de terços, áreas seguras, zebras (sobre-exposição), *focus peaking*, **histograma RGB com aviso de altas luzes/sombras cortadas**, **guias de corte** (1:1, 4:5 Instagram, 9:16 Reels/TikTok, 3:2, 2.39:1 cinema, foto tipo passe 35×45 com oval da cabeça) e **fantasma da última foto** para alinhar a seguinte. |
+| **Fotografia** | PNG sem perdas, JPEG 100, TIFF ou **DNG RAW** (16 bits lineares, N frames empilhados — abre no Lightroom/Camera Raw com exposição e balanço de brancos editáveis; também **DNG + JPEG** com o mesmo nome). Todas as fotos levam **perfil sRGB, EXIF e XMP** (autor, direitos, cliente, palavras-chave, descrição, estrelas). Com chroma, guarda também a **máscara** e o **original**; **temporizador 3/5/10/15/30 s ou personalizado** (seta ▾ do botão Foto ou Shift+Espaço; clicar durante a contagem cancela); **burst** (escolhe automaticamente o frame mais nítido); **empilhamento noturno** (média de N frames → muito menos ruído). |
+| **Gravação Log** | **S-Log3 em ProRes 422 HQ 10 bits** (.mov) com a imagem neutra (sem o look) para color grading no DaVinci/Premiere; LUT **Log→Rec709 (.cube)** exportável. 25/25 fps a 1080p. |
+| **Fluxo de trabalho** | **Revisão de fotos** (Ctrl+Shift+V): estrelas 1–5, escolher/rejeitar, comparar lado a lado, filtrar e copiar as escolhidas; as estrelas ficam no XMP e o Lightroom lê-as. Cópia automática para a pasta de **Importação automática do Lightroom**, botão **Abrir Lightroom**, **exportar o look como LUT 3D (.cube)** para Premiere/DaVinci/Photoshop/OBS. **Perfis da interface**: Completo, Fotógrafo, Vídeo, Live. |
 | **Vídeo** | **Gravar já, com temporizador (3/5/10/15/30 s ou personalizado) ou com paragem automática** (10 s … 10 min ou personalizada), contagem grande no ecrã com bip; FFmpeg: H.264 (x264 ou Intel QSV), H.265 QSV, MJPEG intra (edição); MP4/MOV/MKV; áudio de qualquer microfone; nomes `Projeto_Cena_T01_hhmmss` em pastas por data. |
 | **OBS** | Liga por WebSocket (lê a password do OBS automaticamente): cenas, gravar, live, gravação sincronizada. |
 | **Câmara virtual** | Envia a imagem processada (tracking digital, looks, ruído) para a «OBS Virtual Camera». |
@@ -76,6 +78,7 @@ G grelha · Z zebras · P peaking · N noite · B desfoque · M espelho
 F11 / duplo clique . ecrã inteiro     Ctrl+P ...... reproduzir travelling
 K ................. chroma on/off      Ctrl+M ...... mesa de realização
 Ctrl + clique ..... seguir esse objeto  Alt + clique . conta-gotas do chroma
+Ctrl+Shift+V ...... revisão de fotos (1–5 estrelas · P escolher · X rejeitar · C comparar)
 Mesa: 1–8 preview · Ctrl+1–8 programa · Espaço CUT · Enter AUTO · F FTB · P PiP
 ```
 
@@ -150,7 +153,9 @@ ptz_studio/
   hud.py                elementos no ecrã / gravação / foto
   switcher.py, switcher_ui.py   mesa de realização multi-câmara
   models.py             modelos de IA (incluídos no .exe ou descarregados)
-  media.py              fotos, empilhamento, burst, gravador FFmpeg, câmara virtual
+  media.py              fotos, empilhamento, burst, gravador FFmpeg (incl. Log), câmara virtual
+  photo_formats.py      JPEG/PNG/TIFF com ICC+EXIF+XMP, DNG linear, S-Log3, LUTs .cube
+  review.py             revisão/triagem de fotos (estrelas, escolher, comparar)
   remote.py, web/       servidor Wi-Fi: página do telemóvel, MJPEG, API
   integrations.py       OBS WebSocket, comando XInput, atualização automática
   app.py, widgets.py    interface PySide6
@@ -169,6 +174,8 @@ tests/                  unitários, chroma, ao vivo, hardware, gravador, câmara
 .venv\Scripts\python.exe tests\test_grading.py foto.png         # ajuste automático e referência
 .venv\Scripts\python.exe tests\record_timer_test.py             # botões Gravar/Foto: temporizador, cancelar, paragem
 .venv\Scripts\python.exe tests\hud_test.py                      # elementos no ecrã / gravação / foto
+.venv\Scripts\python.exe tests\test_formats.py foto.png         # ICC/EXIF/XMP, DNG (LibRaw), S-Log3, LUTs (pip install -r requirements-dev.txt)
+.venv\Scripts\python.exe tests\v03_test.py                      # Log, RAW, metadados, Lightroom, máscara, guias, perfis, revisão
 .venv\Scripts\python.exe tests\live_test.py "UVC Camera" "Integrated Webcam"   # fps com chroma/IA e mesa
 ```
 

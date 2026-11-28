@@ -24,9 +24,13 @@ DEFAULTS: dict = {
     "project": "Projeto",
     "scene": "Cena1",
     "take": 1,
-    "photo": {"format": "png", "apply_look": True, "burst": 5, "stack": 8, "timer": 3},
+    "photo": {"format": "png", "apply_look": True, "burst": 5, "stack": 8, "timer": 3,
+              "raw_frames": 8, "export_mask": False, "lightroom_dir": ""},
+    "meta": {"author": "", "copyright": "", "client": "", "keywords": "", "description": "", "rating": 0},
+    "compose": {"guide": "off", "ghost": False, "ghost_opacity": 0.35},
+    "ui_profile": "completo",
     "record": {"codec": "auto", "quality": 20, "audio": "", "container": "mp4",
-               "timer": 3, "auto_stop": 0, "countdown_beep": True},
+               "timer": 3, "auto_stop": 0, "countdown_beep": True, "log": False, "log_neutral": True},
     "ptz": {"speed": 0.5, "invert_pan": False, "invert_tilt": False, "mode": "auto"},
     "calibration": {},              # por dispositivo: pan_fw, tilt_fh, zoom_max_mag
     "pipeline": {

@@ -113,6 +113,7 @@ CODECS = {
     "libx264": "H.264 - CPU (compatível)",
     "mjpeg": "MJPEG intra (edição pesada sem perdas visíveis)",
     "prores4444": "ProRes 4444 com transparência (chroma) - .mov",
+    "prores_log": "LOG S-Log3 · ProRes 422 HQ 10 bits (para color grading) - .mov",
 }
 
 
@@ -131,12 +132,17 @@ class Recorder:
         self.codec = codec
         w, h = size
         self.wants_alpha = codec == "prores4444"   # a captura envia BGRA (alfa do chroma)
-        if self.wants_alpha and path.suffix.lower() != ".mov":
+        self.log = codec == "prores_log"           # curva S-Log3 a 10 bits (sem banding)
+        self._log_lut = None
+        if self.log:
+            from .photo_formats import log_table_u16
+            self._log_lut = log_table_u16()
+        if (self.wants_alpha or self.log) and path.suffix.lower() != ".mov":
             path = path.with_suffix(".mov")
             self.path = path
         # Envia YUV 4:2:0 já convertido (OpenCV SIMD): metade dos bytes e o FFmpeg não converte cor
-        self._yuv = codec not in ("mjpeg", "prores4444") and w % 2 == 0 and h % 2 == 0
-        pix_in = "yuv420p" if self._yuv else ("bgra" if self.wants_alpha else "bgr24")
+        self._yuv = codec not in ("mjpeg", "prores4444", "prores_log") and w % 2 == 0 and h % 2 == 0
+        pix_in = "yuv420p" if self._yuv else ("bgra" if self.wants_alpha else ("bgr48le" if self.log else "bgr24"))
         cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                "-thread_queue_size", "64", "-use_wallclock_as_timestamps", "1",
                "-f", "rawvideo", "-pix_fmt", pix_in, "-s", f"{w}x{h}", "-color_range", "tv", "-i", "-"]
@@ -149,6 +155,10 @@ class Recorder:
             cmd += ["-c:v", codec, "-preset", "medium", "-global_quality", str(q), "-pix_fmt", "nv12"]
         elif codec == "mjpeg":
             cmd += ["-c:v", "mjpeg", "-q:v", "2", "-pix_fmt", "yuvj422p"]
+        elif codec == "prores_log":
+            # encoder "prores" (aw): 39 fps a 1080p neste portátil; o prores_ks só faz ~13 fps
+            cmd += ["-c:v", "prores", "-profile:v", "3", "-pix_fmt", "yuv422p10le", "-vendor", "apl0",
+                    "-color_primaries", "bt709", "-colorspace", "bt709", "-metadata", "comment=Alflor Studio S-Log3 / Rec709"]
         elif codec == "prores4444":
             cmd += ["-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le",
                     "-alpha_bits", "8", "-vendor", "apl0", "-qscale:v", "9"]
@@ -183,14 +193,16 @@ class Recorder:
             try:
                 if self._yuv:
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV_I420)
+                elif self.log:
+                    frame = cv2.LUT(frame, self._log_lut)   # 8 bits → S-Log3 16 bits (~7 ms a 1080p)
                 self.proc.stdin.write(memoryview(frame).cast("B"))
                 self.frames += 1
-            except OSError:
+            except (OSError, ValueError):   # FFmpeg terminou / pipe fechado
                 break
 
     def stop(self) -> str:
         self._q.put(None)
-        self._thread.join(5)
+        self._thread.join(15)
         try:
             if self.proc.stdin:
                 self.proc.stdin.close()

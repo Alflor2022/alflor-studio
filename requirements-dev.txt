@@ -1,0 +1,3 @@
+-r requirements.txt
+pyinstaller>=6.10    # compilar o .exe (packaging/build.ps1)
+rawpy>=0.21          # só testes: revela os DNG com o LibRaw (tests/test_formats.py, tests/v03_test.py)
