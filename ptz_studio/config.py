@@ -24,13 +24,16 @@ DEFAULTS: dict = {
     "project": "Projeto",
     "scene": "Cena1",
     "take": 1,
-    "photo": {"format": "png", "apply_look": True, "burst": 5, "stack": 8},
-    "record": {"codec": "auto", "quality": 20, "audio": "", "container": "mp4"},
+    "photo": {"format": "png", "apply_look": True, "burst": 5, "stack": 8, "timer": 3},
+    "record": {"codec": "auto", "quality": 20, "audio": "", "container": "mp4",
+               "timer": 3, "auto_stop": 0, "countdown_beep": True},
     "ptz": {"speed": 0.5, "invert_pan": False, "invert_tilt": False, "mode": "auto"},
     "calibration": {},              # por dispositivo: pan_fw, tilt_fh, zoom_max_mag
     "pipeline": {
         "denoise": 0, "night": False, "night_gain": 1.8, "sharpen": 0.0,
         "look": "Natural", "bg_blur": False, "mirror": False, "flip": False,
+        "grade": {"mode": "off", "strength": 0.8, "continuous": True, "interval": 2.0,
+                  "ref_path": "", "auto_denoise": True},
         "chroma": {
             "enabled": False, "mode": "chroma", "key": "green", "color": [60, 180, 60],
             "similarity": 0.10, "smoothness": 0.06, "spill": 0.7, "choke": 1, "feather": 1.5,
@@ -121,7 +124,11 @@ class Settings(dict):
             s["remote"]["token"] = secrets.token_urlsafe(8)
         return s
 
+    readonly = False   # modo de teste: NUNCA escrever no disco (nem por caminhos indiretos)
+
     def save(self) -> None:
+        if self.readonly:
+            return
         APP_DATA.mkdir(parents=True, exist_ok=True)
         tmp = CONFIG_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(self, indent=2, ensure_ascii=False), encoding="utf-8")

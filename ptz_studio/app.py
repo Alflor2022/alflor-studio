@@ -31,6 +31,8 @@ from .chroma import VIEWS as CHROMA_VIEWS
 from .config import APP_DATA, Settings
 from .gestures import ACTIONS as GESTURE_ACTIONS
 from .gestures import GESTURES
+from . import hud as hudmod
+from .hud import HudBurner
 from .integrations import Gamepad, OBSLink, apply_update, check_update, restart_app, scene_commands
 from .media import CODECS, Recorder, VirtualCam, best_sharpness, find_ffmpeg, output_path, save_image, stack_frames
 from .pipeline import LOOKS, Pipeline
@@ -51,6 +53,7 @@ SHORTCUTS = """Setas / WASD ...... mover (Shift = rápido, Ctrl = preciso)
 Home / H .......... posição inicial   Esc ...... parar tudo
 1 – 9 ............. ir para preset     Ctrl+1 – 9 ...... guardar preset
 Espaço ............ foto     R ...... gravar     T ...... tracking
+Shift+Espaço ...... foto c/ temporizador   Shift+R ...... gravar c/ temporizador
 G grelha · Z zebras · P peaking · N noite · B desfoque · M espelho
 F11 / duplo clique . ecrã inteiro     Ctrl+P ...... reproduzir travelling
 K ................. chroma on/off      Ctrl+M ...... mesa de realização
@@ -97,6 +100,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.test_mode = test_mode  # teste automático: sem teclado e sem gravar definições
         self.settings = Settings.load()
+        self.settings.readonly = test_mode   # bloqueia TODAS as gravações de definições em teste
         self.setWindowTitle(f"{APP_NAME} {__version__}")
         self.resize(1500, 900)
         self.pipeline = Pipeline(self.settings["pipeline"])
@@ -105,6 +109,8 @@ class MainWindow(QMainWindow):
         self.tracker.mode = self.settings["tracking"]["mode"] if self.settings["tracking"]["mode"] != "subject" else "face"
         self.switcher = None
         self._obs_scenes: queue.Queue = queue.Queue()
+        self.hud = HudBurner(self.settings)   # elementos a queimar na gravação / foto
+        self._last_meta: dict = {}
         self.ptz = PTZController(self.settings, self)
         self.framer = AutoFramer(self.settings["tracking"], self.ptz, self.pipeline)
         self.obs = OBSLink()
@@ -143,6 +149,14 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1500, self.obs_connect)
         if self.settings["updates"]["check"] and time.time() - self.settings["updates"].get("last_check", 0) > 6 * 3600:
             threading.Thread(target=self._check_update_bg, daemon=True).start()
+        threading.Thread(target=self._warm_encoders, daemon=True).start()
+
+    def _warm_encoders(self) -> None:
+        """Testa os codificadores em segundo plano, para a 1.ª gravação arrancar sem ~1,5 s de atraso."""
+        if self.ffmpeg:
+            from .media import encoder_available
+            for codec in ("libx264", "h264_qsv"):
+                encoder_available(self.ffmpeg, codec)
 
     # ======================================================================= UI
     def _build_ui(self) -> None:
@@ -162,11 +176,25 @@ class MainWindow(QMainWindow):
         top.addWidget(btn_refresh)
         top.addWidget(self.lbl_mode)
         top.addStretch(1)
-        self.btn_photo = QPushButton("📷  Foto", objectName="big", toolTip="Espaço")
-        self.btn_photo.clicked.connect(lambda: self.take_photo("single"))
-        self.btn_rec = QPushButton("●  Gravar", objectName="rec", checkable=True, toolTip="R")
+        self.btn_photo = QPushButton("📷  Foto", objectName="big",
+                                     toolTip="Foto agora (Espaço) · com temporizador: Shift+Espaço ou a seta ▾")
+        self.btn_photo.clicked.connect(self._photo_clicked)
+        self.btn_photo_menu = QToolButton(text="⏱ ▾", toolTip="Temporizador da foto")
+        self.btn_photo_menu.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.btn_photo_menu.setMenu(self._build_photo_menu())
+        self._photo_cd_timer = QTimer(self, interval=1000, timeout=self._photo_countdown_tick)
+        self._photo_cd = 0
+        self._photo_cd_mode = "single"
+        self.btn_rec = QPushButton("●  Gravar", objectName="rec", checkable=True,
+                                   toolTip="Gravar agora (R) · com temporizador: Shift+R ou a seta ▾")
         self.btn_rec.setMinimumWidth(130)
-        self.btn_rec.clicked.connect(self.toggle_record)
+        self.btn_rec.clicked.connect(self._rec_clicked)
+        self.btn_rec_menu = QToolButton(text="⏱ ▾", toolTip="Temporizador e duração da gravação")
+        self.btn_rec_menu.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.btn_rec_menu.setMenu(self._build_rec_menu())
+        self._rec_cd_timer = QTimer(self, interval=1000, timeout=self._rec_countdown_tick)
+        self._rec_cd = 0
+        self._auto_stop = QTimer(self, singleShot=True, timeout=lambda: self.toggle_record(False))
         self.btn_track = QPushButton("◎  Seguir", objectName="big", checkable=True, toolTip="T")
         self.btn_track.toggled.connect(self.set_tracking)
         btn_home = QPushButton("⌂  Início", objectName="big", toolTip="Home")
@@ -180,12 +208,13 @@ class MainWindow(QMainWindow):
         self.btn_chroma.toggled.connect(self.set_chroma)
         btn_mesa = QPushButton("🎬  Mesa", objectName="big", toolTip="Mesa de realização multi-câmara (Ctrl+M)")
         btn_mesa.clicked.connect(self.open_switcher)
-        for b in (self.btn_photo, self.btn_rec, self.btn_track, self.btn_gest, self.btn_chroma, btn_home, btn_mesa):
+        for b in (self.btn_photo, self.btn_photo_menu, self.btn_rec, self.btn_rec_menu, self.btn_track, self.btn_gest, self.btn_chroma, btn_home, btn_mesa):
             top.addWidget(b)
         root.addLayout(top)
 
         split = QSplitter(Qt.Orientation.Horizontal)
         self.preview = PreviewWidget(self.settings)
+        self.preview.hud_state = self.hud.state
         self.preview.clicked.connect(self.click_to_center)
         self.preview.drag_velocity.connect(lambda vx, vy: self.ptz.set_velocity(pan=vx, tilt=vy))
         self.preview.drag_end.connect(lambda: self.ptz.set_velocity(pan=0, tilt=0))
@@ -335,24 +364,150 @@ class MainWindow(QMainWindow):
         row.addWidget(chk_flip)
         f.addRow(row)
         lay.addWidget(g)
+        lay.addWidget(self._grading_group())
 
-        g2 = QGroupBox("Monitorização (só no ecrã)")
-        gl = QGridLayout(g2)
-        ov = self.settings["overlays"]
-        self.overlay_checks = {}
-        for i, (key, label) in enumerate((("grid", "Grelha terços (G)"), ("safe", "Áreas seguras"), ("zebra", "Zebras (Z)"),
-                                          ("peaking", "Focus peaking (P)"), ("hist", "Histograma"))):
-            c = QCheckBox(label)
-            c.setChecked(ov[key])
-            c.toggled.connect(lambda v, k=key: ov.__setitem__(k, v))
-            gl.addWidget(c, i // 2, i % 2)
-            self.overlay_checks[key] = c
-        lay.addWidget(g2)
+        lay.addWidget(self._hud_group())
         hint = QLabel("Nota: esta PTZ não expõe foco, exposição nem íris por USB. Se uma câmara os tiver "
                       "(ex.: outra PTZ ou webcam), aparecem automaticamente em «Câmara (hardware)».", objectName="hint", wordWrap=True)
         lay.addWidget(hint)
         lay.addStretch(1)
         return w
+
+    # --- elementos no ecrã / gravação / foto ---------------------------------------------------
+    def _hud_group(self) -> QGroupBox:
+        g = QGroupBox("Elementos: no ecrã, na gravação e na foto")
+        gl = QGridLayout(g)
+        for col, txt in enumerate(("Elemento", "Ecrã", "Gravação", "Foto")):
+            gl.addWidget(QLabel(txt, objectName="hint"), 0, col)
+        ov, hs = self.settings["overlays"], self.settings["hud"]
+        self.overlay_checks = {}
+        center = Qt.AlignmentFlag.AlignCenter
+        row = 1
+        for key, label, _d in hudmod.ITEMS:
+            gl.addWidget(QLabel(label), row, 0)
+            for col, target in enumerate(hudmod.TARGETS, start=1):
+                c = QCheckBox()
+                c.setChecked(hudmod.on(self.settings, key, target))
+                if target == "screen" and key in hudmod.LEGACY_SCREEN:   # mantém os atalhos G/Z/P
+                    c.toggled.connect(lambda v, k=key: (ov.__setitem__(k, v), hs[k].__setitem__("screen", v)))
+                    self.overlay_checks[key] = c
+                else:
+                    c.toggled.connect(lambda v, k=key, tg=target: hs[k].__setitem__(tg, v))
+                gl.addWidget(c, row, col, alignment=center)
+            row += 1
+            if key == "logo":
+                lrow = QHBoxLayout()
+                b_logo = QPushButton("Escolher logótipo…")
+                b_logo.clicked.connect(self._choose_hud_logo)
+                cmb = QComboBox()
+                for k2, v2 in (("br", "Inferior direito"), ("bl", "Inferior esquerdo"), ("tr", "Superior direito"), ("tl", "Superior esquerdo")):
+                    cmb.addItem(v2, k2)
+                cmb.setCurrentIndex(max(0, cmb.findData(hs.get("_logo_corner", "br"))))
+                cmb.currentIndexChanged.connect(lambda _i, c2=cmb: hs.__setitem__("_logo_corner", c2.currentData()))
+                lrow.addWidget(b_logo)
+                lrow.addWidget(cmb)
+                gl.addLayout(lrow, row, 0, 1, 4)
+                row += 1
+        gl.addWidget(QLabel("«Gravação» inclui a câmara virtual (OBS, Zoom, Teams…). Zebras e peaking na gravação "
+                            "custam ~10 ms por frame. A transparência do chroma não cobre os elementos queimados.",
+                            objectName="hint", wordWrap=True), row, 0, 1, 4)
+        return g
+
+    def _choose_hud_logo(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Logótipo (PNG com transparência)", str(Path.home()),
+                                              "Imagens (*.png *.jpg *.jpeg *.webp)")
+        if path:
+            self.settings["hud"]["_logo_path"] = path
+            self.settings.save()
+            self.statusBar().showMessage(f"Logótipo: {Path(path).name} — marque «Ecrã», «Gravação» ou «Foto» na linha Logótipo", 5000)
+
+    # --- ajuste inteligente: automático (ambiente) / igualar a uma referência -----------------
+    def _grading_group(self) -> QGroupBox:
+        from .grading import MODES as GRADE_MODES
+        gr = self.settings["pipeline"]["grade"]
+        g = QGroupBox("Ajuste inteligente da imagem (como o Lightroom)")
+        f = QFormLayout(g)
+        self.cmb_grade = QComboBox()
+        for k, v in GRADE_MODES.items():
+            self.cmb_grade.addItem(v, k)
+        self.cmb_grade.setCurrentIndex(max(0, self.cmb_grade.findData(gr["mode"])))
+        self.cmb_grade.currentIndexChanged.connect(lambda _i: self.set_grade_mode(self.cmb_grade.currentData()))
+        f.addRow("Modo", self.cmb_grade)
+        f.addRow("Intensidade", self._slider(0, 100, int(gr["strength"] * 100), lambda v: gr.__setitem__("strength", v), 100.0))
+        chk_cont = QCheckBox("Adaptar continuamente (acompanha a luz do dia, sem cintilação)")
+        chk_cont.setChecked(bool(gr["continuous"]))
+        chk_cont.toggled.connect(lambda v: (gr.__setitem__("continuous", v), self.pipeline.grader.request_update()))
+        f.addRow(chk_cont)
+        chk_dn = QCheckBox("No automático, ajustar também a redução de ruído")
+        chk_dn.setChecked(bool(gr.get("auto_denoise", True)))
+        chk_dn.toggled.connect(lambda v: gr.__setitem__("auto_denoise", v))
+        f.addRow(chk_dn)
+        row = QHBoxLayout()
+        b_ref = QPushButton("Imagem de referência…")
+        b_ref.setToolTip("Uma foto editada (Lightroom, Photoshop) ou um frame de outro trabalho com o look desejado")
+        b_ref.clicked.connect(self.choose_grade_reference)
+        b_cur = QPushButton("Usar imagem atual")
+        b_cur.setToolTip("Congela o look atual como referência (para repetir noutra sessão ou noutra câmara)")
+        b_cur.clicked.connect(self.grade_reference_from_current)
+        b_now = QPushButton("Analisar agora")
+        b_now.clicked.connect(self.pipeline.grader.request_update)
+        row.addWidget(b_ref)
+        row.addWidget(b_cur)
+        row.addWidget(b_now)
+        f.addRow(row)
+        self.lbl_grade_ref = QLabel(alignment=Qt.AlignmentFlag.AlignLeft)
+        f.addRow("Referência", self.lbl_grade_ref)
+        self.lbl_grade = QLabel("", objectName="hint", wordWrap=True)
+        f.addRow(self.lbl_grade)
+        if gr.get("ref_path") and Path(gr["ref_path"]).exists():
+            self.pipeline.grader.load_reference(gr["ref_path"])
+        self._show_grade_reference()
+        return g
+
+    def set_grade_mode(self, mode: str) -> None:
+        gr = self.settings["pipeline"]["grade"]
+        if mode == "reference" and not self.pipeline.grader.has_reference:
+            self.statusBar().showMessage("Escolha primeiro uma imagem de referência (ou «Usar imagem atual»)", 5000)
+        gr["mode"] = mode
+        self.pipeline.grader.request_update()
+        if self.cmb_grade.currentData() != mode:
+            self.cmb_grade.blockSignals(True)
+            self.cmb_grade.setCurrentIndex(max(0, self.cmb_grade.findData(mode)))
+            self.cmb_grade.blockSignals(False)
+
+    def _show_grade_reference(self) -> None:
+        p = self.settings["pipeline"]["grade"].get("ref_path", "")
+        if p and Path(p).exists():
+            pix = QPixmap(p)
+            if not pix.isNull():
+                self.lbl_grade_ref.setPixmap(pix.scaled(160, 90, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                self.lbl_grade_ref.setToolTip(p)
+                return
+        self.lbl_grade_ref.setText("— (nenhuma)")
+
+    def choose_grade_reference(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Imagem de referência", str(Path.home()),
+                                              "Imagens (*.jpg *.jpeg *.png *.tif *.tiff *.webp *.bmp)")
+        if path and self.pipeline.grader.load_reference(path):
+            self.settings["pipeline"]["grade"]["ref_path"] = path
+            self.settings.save()
+            self._show_grade_reference()
+            self.set_grade_mode("reference")
+        elif path:
+            QMessageBox.warning(self, APP_NAME, "Não foi possível abrir essa imagem.")
+
+    def grade_reference_from_current(self) -> None:
+        img = self.capture.latest(processed=True) if self.capture else None
+        if img is None:
+            return
+        dest = APP_DATA / "referencia_look.png"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        save_image(img, dest, "png")
+        self.pipeline.grader.set_reference(img, "imagem atual")
+        self.settings["pipeline"]["grade"]["ref_path"] = str(dest)
+        self.settings.save()
+        self._show_grade_reference()
+        self.statusBar().showMessage("Look atual guardado como referência", 4000)
 
     def _rebuild_hw_controls(self, info: dict) -> None:
         while self.hw_form.rowCount():
@@ -823,6 +978,19 @@ class MainWindow(QMainWindow):
         self.cmb_audio = QComboBox()
         self.cmb_audio.currentIndexChanged.connect(lambda _i: rc.__setitem__("audio", self.cmb_audio.currentData() or ""))
         f3.addRow("Áudio", self.cmb_audio)
+        trow = QHBoxLayout()
+        spn_timer = QSpinBox(minimum=1, maximum=3600, value=int(rc.get("timer", 3)), suffix=" s",
+                             toolTip="Usado por Shift+R, pelo telemóvel e pela seta ▾ do botão Gravar")
+        spn_timer.valueChanged.connect(lambda v: rc.__setitem__("timer", v))
+        b_timer = QPushButton("⏱ Gravar com temporizador")
+        b_timer.clicked.connect(lambda: self.record_with_timer(spn_timer.value()))
+        trow.addWidget(spn_timer)
+        trow.addWidget(b_timer, 1)
+        f3.addRow("Temporizador", trow)
+        self.spn_auto_stop = QSpinBox(minimum=0, maximum=24 * 3600, value=int(rc.get("auto_stop", 0)), suffix=" s",
+                                      specialValueText="sem limite")
+        self.spn_auto_stop.valueChanged.connect(self._set_auto_stop)
+        f3.addRow("Parar após", self.spn_auto_stop)
         f3.addRow(QLabel("A PTZ não tem microfone. Use um microfone USB, de lapela sem fios (recetor USB) "
                          "ou o microfone do telemóvel via Iriun/iVCam.", objectName="hint", wordWrap=True))
         if not self.ffmpeg:
@@ -1036,6 +1204,7 @@ class MainWindow(QMainWindow):
         self.preview.message = f"A abrir {name}…"
         self.preview.update()
         self.capture = CaptureThread(index, self.settings, self.pipeline, self.tracker, self)
+        self.capture.hud = self.hud
         self.capture.frame_ready.connect(self._on_frame)
         self.capture.status.connect(self.statusBar().showMessage)
         self.capture.failed.connect(self._on_capture_failed)
@@ -1064,6 +1233,7 @@ class MainWindow(QMainWindow):
     def _on_frame(self, img: QImage, meta: dict) -> None:
         self.preview.composition = self.framer.target_point(self.tracker.mode) if self.tracker.enabled else (0.5, 0.5)
         self.preview.set_frame(img, meta)
+        self._last_meta = meta
         if self.btn_track.isChecked():  # só enquadra se o tracking estiver ligado (não só o desfoque)
             self.framer.step(meta.get("raw_box"), self.tracker.mode, head=self.tracker.head)
 
@@ -1078,6 +1248,9 @@ class MainWindow(QMainWindow):
         if self.recorder:
             secs = int((time.time() - self.recorder.started.timestamp()))
             self.preview.rec_time = f"{secs // 3600:02d}:{secs % 3600 // 60:02d}:{secs % 60:02d}"
+            limit = int(self.settings["record"].get("auto_stop", 0))
+            if limit:
+                self.preview.rec_time += f" / {limit // 3600:02d}:{limit % 3600 // 60:02d}:{limit % 60:02d}"
         if self.remote:
             while not self.remote.commands.empty():
                 self._remote_command(self.remote.commands.get_nowait())
@@ -1089,6 +1262,7 @@ class MainWindow(QMainWindow):
                 self._remote_command(cmd)
         self._poll_gamepad()
         self._calibration_tick()
+        self._update_hud_state()
         if hasattr(self, "_tick_slow"):
             self._tick_slow += 1
         else:
@@ -1102,6 +1276,36 @@ class MainWindow(QMainWindow):
                                              " · 2 threads em paralelo")
             else:
                 self.lbl_chroma_perf.setText("desligado")
+            gr = self.settings["pipeline"]["grade"]
+            if gr.get("mode", "off") != "off":
+                rep = self.pipeline.grader.report
+                self.lbl_grade.setText(" · ".join(f"{k}: {v}" for k, v in rep.items()) if rep else "a analisar…")
+            else:
+                self.lbl_grade.setText("")
+
+    def _update_hud_state(self) -> None:
+        st = self.hud.state
+        st["recording"] = self.recorder is not None
+        if self.recorder:
+            st["rec_start"] = self.recorder.started.timestamp()
+        st["fps"] = float(self.settings["fps"])
+        icons = []
+        if self.tracker.enabled and self.btn_track.isChecked():
+            icons.append(f"◎ {self.tracker.state.upper()}")
+        if self.settings["tracking"].get("gestures"):
+            icons.append("👌 GESTOS")
+        if self.settings["pipeline"]["chroma"].get("enabled"):
+            icons.append("🟩 CHROMA")
+        if self.settings["pipeline"].get("night"):
+            icons.append("🌙 NOITE")
+        gm = self.settings["pipeline"].get("grade", {}).get("mode", "off")
+        if gm != "off":
+            icons.append("✨ AUTO" if gm == "auto" else "🎨 REFERÊNCIA")
+        st["status"] = "   ".join(icons)
+        st["info"] = self.preview.info
+        st["slate"] = f"{self.settings['project']} · {self.settings['scene']} · T{int(self.settings['take']):02d}"
+        st["countdown"] = self.preview.countdown
+        st["countdown_label"] = self.preview.countdown_label
 
     def _on_ptz_changed(self, st: dict) -> None:
         self.lbl_pos.setText(f"P {st.get('pan', 0):.0f} · T {st.get('tilt', 0):.0f} · Z {st.get('zoom', 0):.0f}")
@@ -1459,22 +1663,89 @@ class MainWindow(QMainWindow):
         self.lbl_out.setText(d)
         self.settings.save()
 
+    # --- foto: agora ou com temporizador (as mesmas opções da gravação) ------------------------
+    PHOTO_TIMERS = (3, 5, 10, 15, 30)
+
+    def _build_photo_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.addAction("📷  Foto agora   (Espaço)", lambda: self.take_photo("single"))
+        menu.addSection("Temporizador (Shift+Espaço repete o último)")
+        for s in self.PHOTO_TIMERS:
+            menu.addAction(f"⏱  Foto daqui a {s} s", lambda s=s: self.photo_with_timer(s))
+        menu.addAction("⏱  Personalizado…", self._photo_timer_custom)
+        menu.addSection("Com temporizador, em modo")
+        self._photo_timer_mode = "single"
+        grp = []
+        for label, mode in (("Foto simples", "single"), ("Burst (escolhe a mais nítida)", "burst"), ("Noite (empilhar frames)", "stack")):
+            act = menu.addAction(label, lambda m=mode: self._set_photo_timer_mode(m))
+            act.setCheckable(True)
+            act.setChecked(mode == "single")
+            grp.append((mode, act))
+        self._photo_mode_actions = grp
+        return menu
+
+    def _set_photo_timer_mode(self, mode: str) -> None:
+        self._photo_timer_mode = mode
+        for m, act in self._photo_mode_actions:
+            act.setChecked(m == mode)
+
+    def _photo_timer_custom(self) -> None:
+        secs, ok = QInputDialog.getInt(self, "Temporizador", "Tirar a foto daqui a (segundos):",
+                                       int(self.settings["photo"].get("timer", 3)), 1, 3600)
+        if ok:
+            self.photo_with_timer(secs)
+
+    def _photo_clicked(self) -> None:
+        if self._photo_cd_timer.isActive():   # clicar durante a contagem cancela
+            self.cancel_photo_timer()
+            return
+        self.take_photo("single")
+
+    def photo_with_timer(self, secs: int | None = None, mode: str | None = None) -> None:
+        if not self.capture:
+            self.statusBar().showMessage("Sem imagem para fotografar")
+            return
+        if self._photo_cd_timer.isActive():
+            self.cancel_photo_timer()
+            return
+        secs = int(secs or self.settings["photo"].get("timer", 3))
+        self.settings["photo"]["timer"] = secs
+        self._photo_cd = secs
+        self._photo_cd_mode = mode or getattr(self, "_photo_timer_mode", "single")
+        self.preview.countdown = secs
+        self.preview.countdown_label = "📷 FOTO em"
+        self.btn_photo.setText(f"⏱  {secs} s · cancelar")
+        self._photo_cd_timer.start()
+
+    def cancel_photo_timer(self) -> None:
+        self._photo_cd_timer.stop()
+        self.preview.countdown = 0
+        self.preview.countdown_label = ""
+        self.btn_photo.setText("📷  Foto")
+        self.preview.update()
+        self.statusBar().showMessage("Temporizador da foto cancelado", 2000)
+
+    def _photo_countdown_tick(self) -> None:
+        self._photo_cd -= 1
+        if self._photo_cd > 0:
+            self.preview.countdown = self._photo_cd
+            self.btn_photo.setText(f"⏱  {self._photo_cd} s · cancelar")
+            if self.settings["record"].get("countdown_beep", True):
+                QApplication.beep()
+            self.preview.update()
+            return
+        self._photo_cd_timer.stop()
+        self.preview.countdown = 0
+        self.preview.countdown_label = ""
+        self.btn_photo.setText("📷  Foto")
+        self.take_photo(self._photo_cd_mode)
+
     def take_photo(self, mode: str = "single") -> None:
         if not self.capture:
             self.statusBar().showMessage("Sem imagem para fotografar")
             return
-        if mode in ("timer3", "timer10"):
-            self._countdown = 3 if mode == "timer3" else 10
-            self.preview.countdown = self._countdown
-            def tick():
-                self._countdown -= 1
-                self.preview.countdown = self._countdown
-                self.preview.update()
-                if self._countdown <= 0:
-                    self._ct_timer.stop()
-                    self.take_photo("single")
-            self._ct_timer = QTimer(self, interval=1000, timeout=tick)
-            self._ct_timer.start()
+        if mode.startswith("timer"):   # compatibilidade: "timer3", "timer10", "timer5"…
+            self.photo_with_timer(int(mode[5:] or 3), "single")
             return
         ph = self.settings["photo"]
         processed = ph["apply_look"]
@@ -1500,6 +1771,8 @@ class MainWindow(QMainWindow):
                     raise RuntimeError("sem frame")
                 if transparent and alpha is None:
                     alpha = cap.latest_alpha()
+                if hudmod.any_on(self.settings, "photo"):   # ex.: logótipo, data/hora, claquete
+                    img = self.hud.burn(img, dict(self._last_meta), "photo")
                 path = save_image(img, output_path(snapshot, "photo", fmt), fmt, alpha if transparent else None)
                 self.photo_saved.emit(str(path))
             except Exception as exc:
@@ -1511,8 +1784,111 @@ class MainWindow(QMainWindow):
         QApplication.beep()
         self.statusBar().showMessage(f"📷 {path}", 6000)
 
+    # --- gravação: agora, com temporizador, com duração automática --------------------------
+    REC_TIMERS = (3, 5, 10, 15, 30)
+    REC_DURATIONS = ((0, "Sem limite (parar à mão)"), (10, "10 s"), (30, "30 s"), (60, "1 min"), (300, "5 min"), (600, "10 min"))
+
+    def _build_rec_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.addAction("●  Gravar agora   (R)", lambda: self.toggle_record(True))
+        menu.addSection("Temporizador (Shift+R repete o último)")
+        for s in self.REC_TIMERS:
+            menu.addAction(f"⏱  Gravar daqui a {s} s", lambda s=s: self.record_with_timer(s))
+        menu.addAction("⏱  Personalizado…", self._rec_timer_custom)
+        menu.addSection("Parar automaticamente após")
+        rc = self.settings["record"]
+        self._dur_actions = []
+        for secs, label in self.REC_DURATIONS:
+            act = menu.addAction(label, lambda secs=secs: self._set_auto_stop(secs))
+            act.setCheckable(True)
+            act.setChecked(int(rc.get("auto_stop", 0)) == secs)
+            self._dur_actions.append((secs, act))
+        menu.addAction("Duração personalizada…", self._rec_duration_custom)
+        menu.addSeparator()
+        self._act_beep = menu.addAction("Bip na contagem decrescente")
+        self._act_beep.setCheckable(True)
+        self._act_beep.setChecked(bool(rc.get("countdown_beep", True)))
+        self._act_beep.toggled.connect(lambda v: rc.__setitem__("countdown_beep", v))
+        return menu
+
+    def _set_auto_stop(self, secs: int) -> None:
+        self.settings["record"]["auto_stop"] = int(secs)
+        for s, act in self._dur_actions:
+            act.setChecked(s == secs)
+        if hasattr(self, "spn_auto_stop"):
+            self.spn_auto_stop.blockSignals(True)
+            self.spn_auto_stop.setValue(int(secs))
+            self.spn_auto_stop.blockSignals(False)
+        self.statusBar().showMessage("Gravação sem limite" if not secs else f"A gravação para sozinha após {secs} s", 3000)
+
+    def _rec_timer_custom(self) -> None:
+        secs, ok = QInputDialog.getInt(self, "Temporizador", "Começar a gravar daqui a (segundos):",
+                                       int(self.settings["record"].get("timer", 3)), 1, 3600)
+        if ok:
+            self.record_with_timer(secs)
+
+    def _rec_duration_custom(self) -> None:
+        secs, ok = QInputDialog.getInt(self, "Duração", "Parar a gravação automaticamente após (segundos, 0 = sem limite):",
+                                       int(self.settings["record"].get("auto_stop", 0)), 0, 24 * 3600)
+        if ok:
+            self._set_auto_stop(secs)
+
+    def _rec_clicked(self, _checked: bool = False) -> None:
+        if self._rec_cd_timer.isActive():   # clicar durante a contagem cancela
+            self.cancel_record_timer()
+            return
+        self.toggle_record()
+
+    def record_with_timer(self, secs: int | None = None) -> None:
+        """Começa a gravar após uma contagem decrescente visível na imagem."""
+        if self.recorder:
+            self.toggle_record(False)
+            return
+        if not (self.capture and self.ffmpeg):
+            self.statusBar().showMessage("Gravação indisponível (sem imagem ou sem FFmpeg)")
+            return
+        secs = int(secs or self.settings["record"].get("timer", 3))
+        self.settings["record"]["timer"] = secs
+        threading.Thread(target=self._warm_encoders, daemon=True).start()  # pronto quando a contagem acabar
+        self._rec_cd = secs
+        self.preview.countdown = secs
+        self.preview.countdown_label = "● REC em"
+        self.btn_rec.setChecked(True)
+        self.btn_rec.setText(f"⏱  {secs} s · cancelar")
+        self._rec_cd_timer.start()
+        self.statusBar().showMessage(f"A gravação começa daqui a {secs} s (clique em Gravar para cancelar)", secs * 1000)
+
+    def cancel_record_timer(self) -> None:
+        self._rec_cd_timer.stop()
+        self._rec_cd = 0
+        self.preview.countdown = 0
+        self.preview.countdown_label = ""
+        self.btn_rec.setChecked(False)
+        self.btn_rec.setText("●  Gravar")
+        self.preview.update()
+        self.statusBar().showMessage("Temporizador de gravação cancelado", 2000)
+
+    def _rec_countdown_tick(self) -> None:
+        self._rec_cd -= 1
+        if self._rec_cd > 0:
+            self.preview.countdown = self._rec_cd
+            self.btn_rec.setText(f"⏱  {self._rec_cd} s · cancelar")
+            if self.settings["record"].get("countdown_beep", True):
+                QApplication.beep()
+            self.preview.update()
+            return
+        self._rec_cd_timer.stop()
+        self.preview.countdown = 0
+        self.preview.countdown_label = ""
+        self.btn_rec.setChecked(False)
+        self.toggle_record(True)
+
     def toggle_record(self, on: bool | None = None) -> None:
         on = (self.recorder is None) if on is None or not isinstance(on, bool) else on
+        if self._rec_cd_timer.isActive():
+            self.cancel_record_timer()
+            if not on:
+                return
         if on and not self.recorder:
             if not (self.capture and self.ffmpeg):
                 self.btn_rec.setChecked(False)
@@ -1531,12 +1907,16 @@ class MainWindow(QMainWindow):
             self.preview.recording = True
             self.btn_rec.setChecked(True)
             self.btn_rec.setText("■  Parar")
-            self.statusBar().showMessage(f"● A gravar ({self.recorder.codec}) → {path}")
+            limit = int(rc.get("auto_stop", 0))
+            if limit > 0:   # paragem automática (takes com duração fixa)
+                self._auto_stop.start(limit * 1000)
+            self.statusBar().showMessage(f"● A gravar ({self.recorder.codec}) → {path}" + (f" · para sozinha após {limit} s" if limit else ""))
             if self.settings["obs"]["sync_record"] and self.obs.connected:
                 self._obs_do(self.obs.start_record)
         elif not on and self.recorder:
             rec = self.recorder
             self.recorder = None
+            self._auto_stop.stop()
             if self.capture and rec in self.capture.sinks:
                 self.capture.sinks.remove(rec)
             self.preview.recording = False
@@ -1668,10 +2048,15 @@ class MainWindow(QMainWindow):
             self.recall_preset(int(num("n", 1)))
         elif a == "preset_save":
             self.save_preset(int(num("n", 1)))
-        elif a == "photo":
-            self.take_photo(cmd.get("mode", "single"))
-        elif a == "record":
-            self.toggle_record()
+        elif a == "photo":   # opcional: delay=N (temporizador) e mode=single|burst|stack
+            delay = int(num("delay", 0))
+            if delay > 0:
+                self.photo_with_timer(delay, cmd.get("mode", "single"))
+            else:
+                self.take_photo(cmd.get("mode", "single"))
+        elif a == "record":   # opcional: delay=N (segundos de temporizador)
+            delay = int(num("delay", 0))
+            self.record_with_timer(delay) if delay > 0 and not self.recorder else self.toggle_record()
         elif a == "track":
             self.set_tracking(not self.tracker.enabled)
         elif a == "motion":
@@ -1687,6 +2072,8 @@ class MainWindow(QMainWindow):
             self.cmb_look.setCurrentIndex((self.cmb_look.currentIndex() + 1) % self.cmb_look.count())
         elif a == "look":
             self.cmb_look.setCurrentText(cmd.get("name", "Natural"))
+        elif a == "grade":   # mode=auto|reference|off
+            self.set_grade_mode(cmd.get("mode", "auto"))
         elif a in ("track_on", "track_off"):
             self.set_tracking(a == "track_on")
         elif a == "gestures":
@@ -1798,6 +2185,18 @@ class MainWindow(QMainWindow):
         }
         if key == Qt.Key.Key_M and ctrl:
             self.open_switcher()
+            return True
+        if key == Qt.Key.Key_Space and mods & Qt.KeyboardModifier.ShiftModifier:
+            self.photo_with_timer()             # Shift+Espaço: foto com o último temporizador
+            return True
+        if key == Qt.Key.Key_Space and self._photo_cd_timer.isActive():
+            self.cancel_photo_timer()
+            return True
+        if key == Qt.Key.Key_R and mods & Qt.KeyboardModifier.ShiftModifier:
+            self.record_with_timer()            # Shift+R: gravar com o último temporizador
+            return True
+        if key == Qt.Key.Key_R and self._rec_cd_timer.isActive():
+            self.cancel_record_timer()
             return True
         if key == Qt.Key.Key_P:
             self.play_travel() if ctrl else ov["peaking"].toggle()

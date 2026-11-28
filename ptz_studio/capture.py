@@ -37,6 +37,7 @@ class CaptureThread(QThread):
         self._latest_out: np.ndarray | None = None
         self._latest_alpha: np.ndarray | None = None
         self._checker: np.ndarray | None = None
+        self.hud = None                          # HudBurner: elementos a queimar na gravação
         self._grab_requests: list[tuple[int, list, threading.Event]] = []
         self._jpeg_cache: tuple[float, bytes] = (0.0, b"")
         self.fps = 0.0
@@ -161,15 +162,25 @@ class CaptureThread(QThread):
                         pending.append(req)
                 self._grab_requests = pending
             bgra = None
+            sink_img = out
+            if self.sinks and self.hud is not None:
+                # elementos marcados para «gravação» (timecode, claquete, logótipo…) só na saída gravada
+                hmeta = {"box": self.pipeline.box_raw_to_out(box) if box else None}
+                if self.tracker is not None and self.tracker.hands:
+                    hmeta["hands"] = [(self.pipeline.box_raw_to_out(h.box), h.gesture) for h in self.tracker.hands]
+                try:
+                    sink_img = self.hud.burn(out, hmeta, "rec")
+                except Exception as exc:
+                    self.status.emit(f"Erro nos elementos da gravação: {exc}")
             for sink in list(self.sinks):
                 try:
                     if getattr(sink, "wants_alpha", False):   # ex.: ProRes 4444 com transparência
                         if bgra is None:
-                            a = alpha if alpha is not None else np.full(out.shape[:2], 255, np.uint8)
-                            bgra = cv2.merge((*cv2.split(out), a))
+                            a = alpha if alpha is not None else np.full(sink_img.shape[:2], 255, np.uint8)
+                            bgra = cv2.merge((*cv2.split(sink_img), a))
                         sink.write(bgra)
                     else:
-                        sink.write(out)
+                        sink.write(sink_img)
                 except Exception as exc:  # um destino com erro não pode parar a captura
                     self.status.emit(f"Erro em {type(sink).__name__}: {exc}")
                     self.sinks.remove(sink)

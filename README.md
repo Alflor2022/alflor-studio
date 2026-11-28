@@ -27,10 +27,12 @@ Premiere/CapCut, Stream Deck e câmara virtual (Zoom, Teams, Meet…).
 | **Gestos (IA)** | 👌 OK inicia o tracking **na pessoa que fez o gesto**, ✋ palma aberta para, ✌ vitória tira uma foto; 👍 e ✊ configuráveis. Gesto confirmado após ~0,6 s estável, com pausa de 2,5 s contra repetições. |
 | **Chroma key** | Verde/azul/cor personalizada (conta-gotas Alt+clique, calibração automática), semelhança, suavidade, supressão de spill, contração e esbatimento do contorno, garbage matte, light wrap. Modos **Chroma**, **IA sem ecrã verde** e **Híbrido** (chroma nos contornos + IA para retirar objetos). Fundo transparente (PNG com alfa, **ProRes 4444**), cor, imagem, vídeo em ciclo ou desfocado. Acelerado pela GPU Intel (OpenCL) em 2 threads: 25 imagens/s a 1080p. |
 | **Mesa de realização** | Até 8 entradas (câmara principal, outras câmaras USB/telemóvel/HDMI, imagens, vídeos, barras). PROGRAMA/PREVIEW, CUT, AUTO, T-bar, transições Mix/Dip/Wipe/Push, FTB, PiP, **cenário virtual** (chroma por cima de outra entrada), logótipo e oráculo. Multiview com tally, controlo PTZ da câmara em preview, gravação e câmara virtual do programa. |
+| **Ajuste inteligente** | **Automático**: corrige sozinho exposição, balanço de brancos (white patch em zonas neutras), contraste e ruído conforme a luz do dia, de forma contínua e sem cintilação. **Igualar a uma referência**: dê uma foto editada (ex.: Lightroom) ou congele o frame atual — a app iguala cor (transferência Monge-Kantorovich) e tons (curva de luminância), como o *Color Match* do Premiere. Proteção de brilhos automática. |
+| **Elementos no ecrã / gravação / foto** | Cada elemento (grelha, áreas seguras, histograma, zebras, peaking, caixa do tracking, mãos, informação da câmara, ícones de estado, REC, contagem, **timecode**, **data/hora**, **claquete**, **logótipo**) escolhe-se à parte para o ecrã, para a gravação (inclui câmara virtual/OBS) e para a foto. |
 | **Imagem (software)** | Redução de ruído temporal (3 níveis), modo noite (levanta sombras), nitidez extra, looks (Vivo, Quente, Frio, Cinema, Suave, P&B, Alto contraste), desfoque de fundo que segue o sujeito, espelho/inversão. |
 | **Monitorização** | Grelha de terços, áreas seguras, zebras (sobre-exposição), *focus peaking*, histograma. |
-| **Fotografia** | PNG sem perdas, JPEG 100 ou TIFF; temporizador 3/10 s; **burst** (escolhe automaticamente o frame mais nítido); **empilhamento noturno** (média de N frames → muito menos ruído). |
-| **Vídeo** | FFmpeg: H.264 (x264 ou Intel QSV), H.265 QSV, MJPEG intra (edição); MP4/MOV/MKV; áudio de qualquer microfone; nomes `Projeto_Cena_T01_hhmmss` em pastas por data. |
+| **Fotografia** | PNG sem perdas, JPEG 100 ou TIFF; **temporizador 3/5/10/15/30 s ou personalizado** (seta ▾ do botão Foto ou Shift+Espaço; clicar durante a contagem cancela); **burst** (escolhe automaticamente o frame mais nítido); **empilhamento noturno** (média de N frames → muito menos ruído). |
+| **Vídeo** | **Gravar já, com temporizador (3/5/10/15/30 s ou personalizado) ou com paragem automática** (10 s … 10 min ou personalizada), contagem grande no ecrã com bip; FFmpeg: H.264 (x264 ou Intel QSV), H.265 QSV, MJPEG intra (edição); MP4/MOV/MKV; áudio de qualquer microfone; nomes `Projeto_Cena_T01_hhmmss` em pastas por data. |
 | **OBS** | Liga por WebSocket (lê a password do OBS automaticamente): cenas, gravar, live, gravação sincronizada. |
 | **Câmara virtual** | Envia a imagem processada (tracking digital, looks, ruído) para a «OBS Virtual Camera». |
 | **Telemóvel / tablet** | Página web com joystick tátil, zoom, presets (toque longo guarda), foto, gravar, tracking, movimentos e imagem ao vivo. Basta ler o QR code. |
@@ -69,6 +71,7 @@ Setas / WASD ...... mover (Shift = rápido, Ctrl = preciso)
 Home / H .......... posição inicial   Esc ...... parar tudo
 1 – 9 ............. ir para preset     Ctrl+1 – 9 ...... guardar preset
 Espaço ............ foto     R ...... gravar     T ...... tracking
+Shift+Espaço ...... foto c/ temporizador   Shift+R ...... gravar c/ temporizador
 G grelha · Z zebras · P peaking · N noite · B desfoque · M espelho
 F11 / duplo clique . ecrã inteiro     Ctrl+P ...... reproduzir travelling
 K ................. chroma on/off      Ctrl+M ...... mesa de realização
@@ -99,8 +102,10 @@ Mesa: 1–8 preview · Ctrl+1–8 programa · Espaço CUT · Enter AUTO · F FTB
 | `vel` | `pan`, `tilt`, `zoom` (−1…1, velocidade) |
 | `stop`, `home` | – |
 | `preset`, `preset_save` | `n` (1–9) |
-| `photo` | `mode` (`single`, `burst`, `stack`, `timer3`, `timer10`) |
-| `record`, `track`, `night`, `bgblur`, `look_next` | – (alternam) |
+| `photo` | `mode` (`single`, `burst`, `stack`), `delay` (segundos de temporizador) |
+| `record` | `delay` (opcional: segundos de temporizador) |
+| `grade` | `mode` (`auto`, `reference`, `off`) |
+| `track`, `night`, `bgblur`, `look_next` | – (alternam) |
 | `motion` | `kind` (`push_in`, `pull_out`, `pan_sweep`, `tilt_reveal`, `orbit_feel`, `whip_pan`, `crash_zoom`), `duration` |
 | `zoom` | `value` (0–100 %), `duration` |
 | `look` | `name` |
@@ -141,6 +146,8 @@ ptz_studio/
   tracking.py           deteção/seguimento com identidade e recuperação + AutoFramer
   ai.py, gestures.py    IA MediaPipe numa thread própria (mãos, pose, rostos, recorte) e gestos
   chroma.py             chroma key / recorte IA (GPU OpenCL, 2 threads)
+  grading.py            ajuste automático e igualar a uma referência
+  hud.py                elementos no ecrã / gravação / foto
   switcher.py, switcher_ui.py   mesa de realização multi-câmara
   models.py             modelos de IA (incluídos no .exe ou descarregados)
   media.py              fotos, empilhamento, burst, gravador FFmpeg, câmara virtual
@@ -159,6 +166,9 @@ tests/                  unitários, chroma, ao vivo, hardware, gravador, câmara
 .venv\Scripts\python.exe tests\vcam_test.py
 .venv\Scripts\python.exe tests\test_units.py                    # gestos, mesa, gatilhos OBS (sem câmara)
 .venv\Scripts\python.exe tests\test_chroma.py                   # precisão e desempenho do chroma
+.venv\Scripts\python.exe tests\test_grading.py foto.png         # ajuste automático e referência
+.venv\Scripts\python.exe tests\record_timer_test.py             # botões Gravar/Foto: temporizador, cancelar, paragem
+.venv\Scripts\python.exe tests\hud_test.py                      # elementos no ecrã / gravação / foto
 .venv\Scripts\python.exe tests\live_test.py "UVC Camera" "Integrated Webcam"   # fps com chroma/IA e mesa
 ```
 

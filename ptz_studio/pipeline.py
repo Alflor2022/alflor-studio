@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 
 from .chroma import ChromaKeyer
+from .grading import Grader
 
 
 class AsyncStage:
@@ -121,6 +122,7 @@ class Pipeline:
         self._gain_cache: dict[float, np.ndarray] = {}
         self.frame_size = (1920, 1080)
         self.chroma = ChromaKeyer(settings.setdefault("chroma", {}))
+        self.grader = Grader(settings.setdefault("grade", {}))   # ajuste automático / igualar referência
         self.alpha: np.ndarray | None = None      # alfa do chroma do último frame (ou None)
         self.ai_mask_raw: np.ndarray | None = None  # máscara de pessoa da IA (coords raw)
         self._chroma_stage = AsyncStage(self._chroma_pair)
@@ -201,10 +203,16 @@ class Pipeline:
         if s["night"]:
             frame = cv2.LUT(frame, self._gain_lut(float(s["night_gain"])))
         level = int(s["denoise"]) + (1 if s["night"] else 0)
+        gr = s.get("grade", {})
+        grading = gr.get("mode", "off") != "off"
+        if grading and gr.get("mode") == "auto" and gr.get("auto_denoise", True):
+            level = max(level, self.grader.suggested_denoise)   # pouca luz → mais redução de ruído
         if level > 0:
             frame = self._temporal_denoise(frame, min(level, 3))
         else:
             self._prev = None
+        if grading:
+            self.grader.maybe_update(frame)   # analisa antes do chroma (a cena real, não o fundo novo)
         ck = s.get("chroma", {})
         if ck.get("enabled"):
             self.chroma.ai_mask = self._aligned_ai_mask()
@@ -219,6 +227,8 @@ class Pipeline:
         if amt > 0:
             blur = cv2.GaussianBlur(frame, (0, 0), 1.3)
             frame = cv2.addWeighted(frame, 1 + amt, blur, -amt, 0)
+        if grading:
+            frame = self.grader.apply(frame)
         matrix, lut = LOOKS.get(s["look"], (None, None))
         if matrix is not None:
             frame = cv2.transform(frame, matrix)

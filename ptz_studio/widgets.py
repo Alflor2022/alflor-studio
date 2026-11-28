@@ -30,6 +30,9 @@ class PreviewWidget(QWidget):
         self.message = "Sem imagem"
         self.info = ""
         self.countdown = 0
+        self.countdown_label = ""        # ex.: "● REC em" (temporizador de gravação)
+        self.hud_state: dict = {}         # partilhado com o HudBurner (estado, claquete, relógio…)
+        self._logo_pix = None
         self.recording = False
         self.rec_time = ""
         self.composition = (0.5, 0.5)
@@ -72,6 +75,8 @@ class PreviewWidget(QWidget):
             return
         p.drawImage(r, self.image)
         ov = self.settings["overlays"]
+        from . import hud
+        scr = lambda key: hud.on(self.settings, key, "screen")
         thin = QPen(QColor(255, 255, 255, 90), 1)
         if ov["grid"]:
             p.setPen(thin)
@@ -85,13 +90,14 @@ class PreviewWidget(QWidget):
                 p.setPen(QPen(col, 1, Qt.PenStyle.DashLine))
                 p.drawRect(QRectF(r.x() + r.width() * (1 - frac) / 2, r.y() + r.height() * (1 - frac) / 2, r.width() * frac, r.height() * frac))
         # centro
-        p.setPen(QPen(QColor(255, 255, 255, 140), 1))
-        c = r.center()
-        p.drawLine(QPointF(c.x() - 10, c.y()), QPointF(c.x() + 10, c.y()))
-        p.drawLine(QPointF(c.x(), c.y() - 10), QPointF(c.x(), c.y() + 10))
+        if scr("center"):
+            p.setPen(QPen(QColor(255, 255, 255, 140), 1))
+            c = r.center()
+            p.drawLine(QPointF(c.x() - 10, c.y()), QPointF(c.x() + 10, c.y()))
+            p.drawLine(QPointF(c.x(), c.y() - 10), QPointF(c.x(), c.y() + 10))
         # sujeito em tracking
         box = self.meta.get("box")
-        if box:
+        if box and scr("track"):
             bx = QRectF(r.x() + box[0] * r.width(), r.y() + box[1] * r.height(), box[2] * r.width(), box[3] * r.height())
             p.setPen(QPen(ACCENT, 2))
             L = min(bx.width(), bx.height()) * 0.25
@@ -106,7 +112,7 @@ class PreviewWidget(QWidget):
             p.drawRect(self._select_rect)
         # mãos detetadas pela IA e gesto reconhecido
         hands = self.meta.get("hands") or []
-        if hands:
+        if hands and scr("hands"):
             from .gestures import GESTURES
             p.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
             for (hx, hy, hw, hh), gesture in hands:
@@ -117,7 +123,7 @@ class PreviewWidget(QWidget):
                 if gesture:
                     p.drawText(QPointF(hr.x(), hr.y() - 6), GESTURES.get(gesture, gesture))
         state = self.meta.get("state")
-        if state and state != "parado":
+        if state and state != "parado" and scr("status"):
             p.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
             p.setPen(ACCENT if state == "a seguir" else QColor("#ffcf5c"))
             p.drawText(QPointF(r.right() - 160, r.y() + 24), f"◎ {state}")
@@ -136,14 +142,51 @@ class PreviewWidget(QWidget):
         # textos
         p.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
         p.setPen(QColor(255, 255, 255, 220))
-        p.drawText(QRectF(r.x() + 12, r.bottom() - 28, r.width() - 220, 20), Qt.AlignmentFlag.AlignLeft, self.info)
-        if self.recording:
+        if scr("info"):
+            p.drawText(QRectF(r.x() + 12, r.bottom() - 28, r.width() - 220, 20), Qt.AlignmentFlag.AlignLeft, self.info)
+        hs = self.hud_state
+        y_top = r.y() + (44 if self.recording and scr("rec") else 14)
+        if scr("status") and hs.get("status"):
+            p.setPen(QColor("#ffb27a"))
+            p.drawText(QPointF(r.x() + 14, y_top + 12), hs["status"])
+        if scr("clock"):
+            import datetime as _dt
+            p.setPen(QColor("white"))
+            p.drawText(QRectF(r.x(), r.y() + 8, r.width() - 14, 20), Qt.AlignmentFlag.AlignRight, _dt.datetime.now().strftime("%d/%m/%Y  %H:%M:%S"))
+        if scr("slate") and hs.get("slate"):
+            p.setPen(QColor("white"))
+            p.drawText(QRectF(r.x(), r.y() + 30, r.width() - 14, 20), Qt.AlignmentFlag.AlignRight, hs["slate"])
+        if scr("timecode") and self.recording and hs.get("rec_start"):
+            import time as _t
+            el = max(0.0, _t.time() - hs["rec_start"])
+            fps = max(1, int(round(hs.get("fps", 30))))
+            p.setFont(QFont("Consolas", 14, QFont.Weight.Bold))
+            p.setPen(QColor("white"))
+            p.drawText(QRectF(r.x(), r.bottom() - 60, r.width(), 24), Qt.AlignmentFlag.AlignCenter,
+                       f"{int(el // 3600):02d}:{int(el % 3600 // 60):02d}:{int(el % 60):02d}:{int((el % 1) * fps):02d}")
+            p.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        if scr("logo"):
+            path = self.settings.get("hud", {}).get("_logo_path", "")
+            if path and (self._logo_pix is None or self._logo_pix[0] != path):
+                from PySide6.QtGui import QPixmap
+                self._logo_pix = (path, QPixmap(path))
+            if path and self._logo_pix and not self._logo_pix[1].isNull():
+                lp = self._logo_pix[1].scaledToWidth(int(r.width() * 0.12), Qt.TransformationMode.SmoothTransformation)
+                corner = self.settings["hud"].get("_logo_corner", "br")
+                lx = r.right() - lp.width() - 14 if corner in ("tr", "br") else r.x() + 14
+                ly = r.y() + 14 if corner in ("tr", "tl") else r.bottom() - lp.height() - 14
+                p.drawPixmap(int(lx), int(ly), lp)
+        if self.recording and scr("rec"):
             p.setBrush(QBrush(QColor("#ff3b4a")))
             p.setPen(Qt.PenStyle.NoPen)
             p.drawEllipse(QPointF(r.x() + 22, r.y() + 22), 7, 7)
             p.setPen(QColor("white"))
             p.drawText(QPointF(r.x() + 36, r.y() + 27), f"REC  {self.rec_time}")
-        if self.countdown:
+        if self.countdown and scr("countdown"):
+            if self.countdown_label:  # gravação com temporizador: legenda vermelha por cima do número
+                p.setFont(QFont("Segoe UI", 26, QFont.Weight.Bold))
+                p.setPen(QColor("#ff3b4a"))
+                p.drawText(QRectF(r.x(), r.center().y() - 150, r.width(), 50), Qt.AlignmentFlag.AlignCenter, self.countdown_label)
             p.setFont(QFont("Segoe UI", 96, QFont.Weight.Bold))
             p.setPen(QColor(255, 255, 255, 230))
             p.drawText(r, Qt.AlignmentFlag.AlignCenter, str(self.countdown))
